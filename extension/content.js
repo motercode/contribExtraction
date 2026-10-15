@@ -56,6 +56,38 @@ const cleanImageUrl = (value) => {
   return match ? match[0].replace(/&amp;/g, '&') : '';
 };
 
+const extractCoordinatesFromUrl = (url = '') => {
+  const match = String(url).match(/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/i);
+
+  if (!match) {
+    return null;
+  }
+
+  const latitude = Number(match[1]);
+  const longitude = Number(match[2]);
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude
+  };
+};
+
+const resolveContributionUrl = (node, directHref = '') => {
+  const closestLink = node && typeof node.closest === 'function' ? node.closest('a[href]') : null;
+  const href = closestLink ? closestLink.href : directHref;
+  const normalized = href ? normalizeUrl(href) : '';
+
+  if (normalized && isContributionLikeUrl(normalized)) {
+    return normalized;
+  }
+
+  return normalized || (directHref ? normalizeUrl(directHref) : '');
+};
+
 const isContributionLikeUrl = (url) => {
   if (!url) {
     return false;
@@ -153,7 +185,7 @@ const extractFromCurrentPage = () => {
 
   for (const node of candidateNodes) {
     const href = node.href || node.getAttribute('href') || '';
-    const candidateUrl = href ? normalizeUrl(href) : '';
+    const candidateUrl = resolveContributionUrl(node, href);
     const imageUrl = extractImageUrlFromNode(node);
     const title = getNodeTitle(node);
     const combinedText = [title, candidateUrl, imageUrl].filter(Boolean).join(' ');
@@ -179,7 +211,8 @@ const extractFromCurrentPage = () => {
     }
 
     const url = candidateUrl || window.location.href;
-    const key = (imageUrl || url).toLowerCase();
+    const coordinates = extractCoordinatesFromUrl(url);
+    const key = `${(imageUrl || url).toLowerCase()}|${(candidateUrl || '').toLowerCase()}`;
     const finalTitle = GENERIC_LABELS.some((pattern) => pattern.test(title || '')) || GENERIC_PHOTO_COUNTER.test(title || '')
       ? 'Contribución de Google Maps'
       : (title || 'Sin título');
@@ -190,6 +223,7 @@ const extractFromCurrentPage = () => {
       url,
       imageUrl: imageUrl || null,
       sourceUrl: window.location.href,
+      coordinates: coordinates || null,
       capturedAt: new Date().toISOString()
     };
 

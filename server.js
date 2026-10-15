@@ -34,6 +34,12 @@ const readExportFile = () => {
 const normalizeItem = (item) => {
   const title = String(item?.title || 'Sin título').trim();
   const safeTitle = isGenericTitle(title) ? 'Contribución de Google Maps' : title || 'Sin título';
+  const coordinates = item?.coordinates && typeof item.coordinates === 'object'
+    ? {
+        latitude: Number(item.coordinates.latitude),
+        longitude: Number(item.coordinates.longitude)
+      }
+    : null;
 
   return {
     title: safeTitle.slice(0, 180),
@@ -41,6 +47,7 @@ const normalizeItem = (item) => {
     url: String(item?.url || '').trim() || 'https://www.google.com/maps',
     imageUrl: item?.imageUrl ? String(item.imageUrl) : null,
     sourceUrl: String(item?.sourceUrl || '').trim() || 'https://www.google.com/maps',
+    coordinates: coordinates && Number.isFinite(coordinates.latitude) && Number.isFinite(coordinates.longitude) ? coordinates : null,
     capturedAt: item?.capturedAt || new Date().toISOString()
   };
 };
@@ -90,7 +97,7 @@ const dedupeItems = (items = []) => {
       continue;
     }
 
-    const key = (imageUrl || url).toLowerCase();
+    const key = `${(imageUrl || url).toLowerCase()}|${(normalized.url || '').toLowerCase()}`;
     const current = bestByKey.get(key);
 
     if (!current) {
