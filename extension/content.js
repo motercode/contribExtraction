@@ -1,5 +1,28 @@
 const SAFE_ORIGINS = ['google.com', 'maps.google.com'];
 const GENERIC_PHOTO_COUNTER = /^(foto|photo|image)\s+\d+\s+(de|of)\s+\d+$/i;
+const GENERIC_LABELS = [
+  /^foto de perfil$/i,
+  /^foto$/i,
+  /^photo$/i,
+  /^image$/i,
+  /^sin t[ií]tulo$/i,
+  /^acciones de la foto$/i,
+  /^actions of the photo$/i,
+  /^perfil$/i,
+  /^profile$/i,
+  /^avatar$/i,
+  /^ver m[aá]s$/i,
+  /^open photo$/i,
+  /^abrir foto$/i
+];
+const GOOGLE_META_PATTERNS = [
+  /accounts\.google\.com\/SignOutOptions/i,
+  /google\.com\/images\/branding\//i,
+  /mapslogo\//i,
+  /google\.com\/maps\/preview/i,
+  /google\.com\/maps\?hl=/i,
+  /google\.com\/maps\/contrib\/.+\/photos\/@.*?data=.*entry=ttu/i
+];
 
 const isGoogleMapsPage = () => {
   const url = window.location.href || '';
@@ -40,6 +63,23 @@ const isContributionLikeUrl = (url) => {
 
   return /\/maps\/.*(?:contrib|photo|photos|review|reviews)|\/maps\/contrib\//i.test(url)
     || /\/maps\/.*(?:photo|photos|review|reviews)/i.test(url);
+};
+
+const isGoogleMetaItem = (title = '', url = '', imageUrl = '') => {
+  const haystack = `${title} ${url} ${imageUrl}`.toLowerCase();
+  if (!haystack) {
+    return false;
+  }
+
+  if (GENERIC_LABELS.some((pattern) => pattern.test(title))) {
+    return true;
+  }
+
+  if (/cuenta de google|google account|sign out|cerrar sesión|perfil de google|profile photo/i.test(title)) {
+    return true;
+  }
+
+  return GOOGLE_META_PATTERNS.some((pattern) => pattern.test(haystack));
 };
 
 const findScrollableElement = () => {
@@ -107,7 +147,7 @@ const getNodeTitle = (node) => {
 };
 
 const extractFromCurrentPage = () => {
-  const seen = new Set();
+  const seen = new Map();
   const items = [];
   const candidateNodes = Array.from(document.querySelectorAll('img, a[href], [data-photo-id], [data-review-id], [role="article"], [role="link"], article, div[jsname]'));
 
@@ -123,32 +163,53 @@ const extractFromCurrentPage = () => {
     }
 
     const isGenericPhotoCounter = GENERIC_PHOTO_COUNTER.test(title) || /^(foto|photo)\s+\d+\s+(de|of)\s+\d+$/i.test(safeText(node.textContent || ''));
+    const isGoogleMeta = isGoogleMetaItem(title, candidateUrl, imageUrl);
     const hasRealContributionSignal = Boolean(imageUrl)
       || isContributionLikeUrl(candidateUrl)
       || !!node.getAttribute('data-photo-id')
       || !!node.getAttribute('data-review-id')
       || /contrib|review|photo|foto|publicaci|valoraci/i.test(combinedText);
 
-    if (!hasRealContributionSignal || (isGenericPhotoCounter && !imageUrl)) {
+    if (isGoogleMeta || !hasRealContributionSignal || (isGenericPhotoCounter && !imageUrl)) {
+      continue;
+    }
+
+    if (!imageUrl && !isContributionLikeUrl(candidateUrl)) {
       continue;
     }
 
     const url = candidateUrl || window.location.href;
-    const key = `${imageUrl || url}|${title.slice(0, 80)}`.toLowerCase();
+    const key = (imageUrl || url).toLowerCase();
+    const finalTitle = GENERIC_LABELS.some((pattern) => pattern.test(title || '')) || GENERIC_PHOTO_COUNTER.test(title || '')
+      ? 'Contribución de Google Maps'
+      : (title || 'Sin título');
 
-    if (seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    items.push({
-      title: title || 'Sin título',
-      text: title || 'Sin descripción disponible',
+    const item = {
+      title: finalTitle,
+      text: finalTitle,
       url,
       imageUrl: imageUrl || null,
       sourceUrl: window.location.href,
       capturedAt: new Date().toISOString()
-    });
+    };
+
+    if (seen.has(key)) {
+      const existing = seen.get(key);
+      const existingGeneric = GENERIC_LABELS.some((pattern) => pattern.test(existing.title || ''));
+      const currentGeneric = GENERIC_LABELS.some((pattern) => pattern.test(title || ''));
+
+      if (!currentGeneric && existingGeneric) {
+        seen.set(key, item);
+        const index = items.findIndex((entry) => (entry.imageUrl || entry.url).toLowerCase() === key);
+        if (index >= 0) {
+          items[index] = item;
+        }
+      }
+      continue;
+    }
+
+    seen.set(key, item);
+    items.push(item);
   }
 
   return items.slice(0, 200);

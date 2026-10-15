@@ -31,25 +31,42 @@ const readExportFile = () => {
   }
 };
 
-const normalizeItem = (item) => ({
-  title: String(item?.title || 'Sin título').slice(0, 180),
-  text: String(item?.text || 'Sin descripción disponible').slice(0, 500),
-  url: String(item?.url || '').trim() || 'https://www.google.com/maps',
-  imageUrl: item?.imageUrl ? String(item.imageUrl) : null,
-  sourceUrl: String(item?.sourceUrl || '').trim() || 'https://www.google.com/maps',
-  capturedAt: item?.capturedAt || new Date().toISOString()
-});
+const normalizeItem = (item) => {
+  const title = String(item?.title || 'Sin título').trim();
+  const safeTitle = isGenericTitle(title) ? 'Contribución de Google Maps' : title || 'Sin título';
+
+  return {
+    title: safeTitle.slice(0, 180),
+    text: String(item?.text || safeTitle || 'Sin descripción disponible').slice(0, 500),
+    url: String(item?.url || '').trim() || 'https://www.google.com/maps',
+    imageUrl: item?.imageUrl ? String(item.imageUrl) : null,
+    sourceUrl: String(item?.sourceUrl || '').trim() || 'https://www.google.com/maps',
+    capturedAt: item?.capturedAt || new Date().toISOString()
+  };
+};
 
 const isGenericTitle = (title = '') => {
   if (!title) {
     return true;
   }
 
-  return /^(foto|photo|image)\s+\d+\s+(de|of)\s+\d+$/i.test(title.trim());
+  return /^(foto|photo|image)\s+\d+\s+(de|of)\s+\d+$/i.test(title.trim())
+    || /^(foto de perfil|sin t[ií]tulo|acciones de la foto|profile|perfil|avatar|ver m[aá]s)$/i.test(title.trim());
+};
+
+const isGoogleMetadataItem = (item = {}) => {
+  const haystack = `${item?.title || ''} ${item?.url || ''} ${item?.imageUrl || ''}`.toLowerCase();
+
+  if (!haystack) {
+    return false;
+  }
+
+  return /accounts\.google\.com\/SignOutOptions|google\.com\/images\/branding\//i.test(haystack)
+    || /cuenta de google|sign out|cerrar sesión|foto de perfil|acciones de la foto|sin título|profile photo/i.test(item?.title || '');
 };
 
 const dedupeItems = (items = []) => {
-  const seen = new Set();
+  const bestByKey = new Map();
   const filtered = [];
 
   for (const item of items) {
@@ -65,17 +82,34 @@ const dedupeItems = (items = []) => {
     const hasImage = Boolean(imageUrl);
     const isGeneric = isGenericTitle(title);
 
-    if (isGeneric && !hasImage && !/\/maps\/.*(?:contrib|photo|photos|review|reviews)/i.test(url)) {
+    if (isGoogleMetadataItem(normalized) || (isGeneric && !hasImage && !/\/maps\/.*(?:contrib|photo|photos|review|reviews)/i.test(url))) {
       continue;
     }
 
-    const key = `${imageUrl || url}|${title}`.toLowerCase();
-    if (seen.has(key)) {
+    if (!hasImage && !/\/maps\/.*(?:contrib|photo|photos|review|reviews)/i.test(url)) {
       continue;
     }
 
-    seen.add(key);
-    filtered.push(normalized);
+    const key = (imageUrl || url).toLowerCase();
+    const current = bestByKey.get(key);
+
+    if (!current) {
+      bestByKey.set(key, normalized);
+      continue;
+    }
+
+    const currentGeneric = isGenericTitle(current.title || '');
+    if (!currentGeneric && isGeneric) {
+      continue;
+    }
+
+    if (currentGeneric && !isGeneric) {
+      bestByKey.set(key, normalized);
+    }
+  }
+
+  for (const value of bestByKey.values()) {
+    filtered.push(value);
   }
 
   return filtered.slice(0, 200);
