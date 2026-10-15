@@ -26,7 +26,29 @@ const GOOGLE_META_PATTERNS = [
 
 const isGoogleMapsPage = () => {
   const url = window.location.href || '';
-  return SAFE_ORIGINS.some((origin) => url.includes(origin)) && (url.includes('/maps') || url.includes('google.com'));
+  const isConsentPage = /consent\.google\.com\//i.test(url) || /continue=.*maps/i.test(url);
+  return SAFE_ORIGINS.some((origin) => url.includes(origin)) && (url.includes('/maps') || isConsentPage || url.includes('google.com'));
+};
+
+const clickGoogleConsentButton = async () => {
+  const maxAttempts = 20;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const consentNode = Array.from(document.querySelectorAll('button, [role="button"], a, div, span')).find((node) => {
+      const text = safeText(node.textContent || node.getAttribute('aria-label') || node.getAttribute('title') || '');
+      return /rechazar todo|reject all|aceptar todo|accept all/i.test(text);
+    });
+
+    if (consentNode) {
+      consentNode.click();
+      await new Promise((resolve) => setTimeout(resolve, 1400));
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  return false;
 };
 
 const safeText = (value) => {
@@ -134,6 +156,51 @@ const findScrollableElement = () => {
   return best || document.scrollingElement || document.body;
 };
 
+const isLikelyAvatarImage = (value = '') => {
+  const normalized = String(value || '').toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  return /\/a-\//i.test(normalized)
+    || /w72-h72|w144-h144|w96-h96|w48-h48/i.test(normalized)
+    || /profile.*google|google.*profile/i.test(normalized);
+};
+
+const pickBestImageUrl = (images = []) => {
+  const preferred = [];
+  const fallback = [];
+
+  for (const imageNode of images) {
+    const value = cleanImageUrl(
+      imageNode.currentSrc || imageNode.src || imageNode.getAttribute('src') || imageNode.getAttribute('data-src') || ''
+    );
+
+    if (!value || isLikelyAvatarImage(value)) {
+      continue;
+    }
+
+    if (/gps-cs|gpms-cs|googleusercontent\.com/.test(value)) {
+      if (/w1200-h|w900-h|w600-h|w800-h/.test(value)) {
+        preferred.push(value);
+      } else {
+        fallback.push(value);
+      }
+    }
+  }
+
+  if (preferred.length) {
+    return preferred[0];
+  }
+
+  if (fallback.length) {
+    return fallback[0];
+  }
+
+  return '';
+};
+
 const extractImageUrlFromNode = (node) => {
   const candidates = [];
 
@@ -145,17 +212,7 @@ const extractImageUrlFromNode = (node) => {
     candidates.push(node);
   }
 
-  for (const imageNode of candidates) {
-    const value = cleanImageUrl(
-      imageNode.currentSrc || imageNode.src || imageNode.getAttribute('src') || imageNode.getAttribute('data-src') || ''
-    );
-
-    if (value) {
-      return value;
-    }
-  }
-
-  return '';
+  return pickBestImageUrl(candidates);
 };
 
 const getNodeTitle = (node) => {
@@ -249,6 +306,198 @@ const extractFromCurrentPage = () => {
   return items.slice(0, 200);
 };
 
+let galleryCursor = 0;
+
+const resetGalleryCursor = () => {
+  galleryCursor = 0;
+};
+
+const findGalleryPhotoButtons = () => {
+  const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+
+  return buttons.filter((button) => {
+    const label = safeText(button.getAttribute('aria-label') || button.textContent || '');
+    const isGalleryCounter = /foto\s+\d+\s+de\s+\d+|photo\s+\d+\s+of\s+\d+/i.test(label);
+    const isActionLabel = /acciones de la foto|actions of the photo|foto de perfil|profile photo/i.test(label);
+    return isGalleryCounter && !isActionLabel;
+  });
+};
+
+const waitForUrlChange = async (previousUrl, timeoutMs = 12000) => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (window.location.href !== previousUrl) {
+      return window.location.href;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return window.location.href;
+};
+
+// Waits until window.location.href stops changing for stableMs, then returns it.
+const waitForUrlStable = async (timeoutMs = 5000, stableMs = 1000) => {
+  const startedAt = Date.now();
+  let lastUrl = window.location.href;
+  let lastChangeAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const current = window.location.href;
+    if (current !== lastUrl) {
+      lastUrl = current;
+      lastChangeAt = Date.now();
+    } else if (Date.now() - lastChangeAt >= stableMs) {
+      return lastUrl;
+    }
+  }
+
+  return window.location.href;
+};
+
+// Captures thumbnail srcs from <img decoding="async"> with centering inline styles.
+// These are the profile-page thumbnail images — all loaded in the SPA DOM before any click.
+const captureViewerThumbnailSrcs = () =>
+  Array.from(document.querySelectorAll('img[decoding="async"]'))
+    .filter((img) => {
+      const style = img.getAttribute('style') || '';
+      return (
+        /position\s*:\s*absolute/i.test(style) &&
+        /top\s*:\s*50%/i.test(style) &&
+        /left\s*:\s*50%/i.test(style)
+      );
+    })
+    .map((img) => (img.currentSrc || img.src || '').trim())
+    .filter((src) => /lh3\.googleusercontent\.com/i.test(src));
+
+const collectCurrentDetailItem = (currentUrl = window.location.href, preImageUrl = null) => {
+  const normalizedUrl = String(currentUrl || '').trim();
+  if (!normalizedUrl || !/\/maps\/contrib\/.*\/photos\//i.test(normalizedUrl) || !/@-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?/i.test(normalizedUrl)) {
+    return null;
+  }
+
+  // Prefer pre-captured thumbnail src (indexed by cursor before the click).
+  // Fall back to DOM search only when not provided.
+  const imageUrl = preImageUrl
+    || pickBestImageUrl(Array.from(document.querySelectorAll('img[src*="googleusercontent.com"], img[src*="lh3.googleusercontent.com"]')));
+  const coordinates = extractCoordinatesFromUrl(normalizedUrl);
+
+  if (!coordinates && !imageUrl) {
+    return null;
+  }
+
+  return {
+    title: 'Contribución de Google Maps',
+    text: 'Contribución de Google Maps',
+    url: normalizedUrl,
+    imageUrl: imageUrl || null,
+    sourceUrl: window.location.href,
+    coordinates,
+    capturedAt: new Date().toISOString()
+  };
+};
+
+const findNextPhotoButton = () => {
+  const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+
+  for (const candidate of candidates) {
+    const label = safeText(candidate.textContent || candidate.getAttribute('aria-label') || '');
+    if (/siguiente|next|sig\.|next photo|next photo/i.test(label)) {
+      return candidate;
+    }
+
+    const name = candidate.getAttribute('aria-label') || candidate.getAttribute('title') || '';
+    if (/siguiente|next/i.test(name)) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
+const getMaxGalleryItems = (message = {}) => {
+  const requested = Number(message.maxItems);
+  if (Number.isFinite(requested) && requested > 0) {
+    return Math.min(requested, 5000);
+  }
+
+  return Number.MAX_SAFE_INTEGER;
+};
+
+const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
+  const items = [];
+  const seen = new Set();
+  let noProgressCount = 0;
+
+  // Capture all thumbnail srcs upfront — they persist in the SPA DOM throughout the session.
+  // Index matches galleryCursor, so thumbnailSrcs[galleryCursor] is always the right imageUrl.
+  const thumbnailSrcs = captureViewerThumbnailSrcs();
+
+  for (let attempt = 0; attempt < 120 && items.length < maxItems; attempt += 1) {
+    const galleryButtons = findGalleryPhotoButtons();
+    if (!galleryButtons.length) {
+      break;
+    }
+
+    const index = Math.min(galleryCursor, galleryButtons.length - 1);
+    const button = galleryButtons[index];
+    const previousUrl = window.location.href;
+
+    if (!button || typeof button.click !== 'function') {
+      break;
+    }
+
+    // Pre-capture imageUrl for this cursor position before the click changes the URL
+    const preImageUrl = thumbnailSrcs[galleryCursor] || null;
+
+    const beforeCount = items.length;
+    button.scrollIntoView({ block: 'center', inline: 'center' });
+    button.click();
+
+    const afterUrl = await waitForUrlChange(previousUrl, 12000);
+    // Wait for the URL to fully settle (g_ep and other params finalized by the SPA)
+    const finalUrl = await waitForUrlStable(5000, 1000);
+    const detailItem = collectCurrentDetailItem(finalUrl, preImageUrl);
+
+    if (detailItem) {
+      const key = `${(detailItem.imageUrl || detailItem.url).toLowerCase()}|${detailItem.url.toLowerCase()}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        items.push(detailItem);
+      }
+    }
+
+    galleryCursor += 1;
+
+    if (afterUrl === previousUrl) {
+      const fallbackNext = findNextPhotoButton();
+      if (fallbackNext) {
+        fallbackNext.click();
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+    }
+
+    if (items.length === beforeCount) {
+      noProgressCount += 1;
+    } else {
+      noProgressCount = 0;
+    }
+
+    if (noProgressCount >= 6) {
+      break;
+    }
+
+    if (items.length >= maxItems) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+
+  return items;
+};
+
 const scrollPageForResults = async () => {
   const target = findScrollableElement();
   let previous = 0;
@@ -288,9 +537,30 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'EXTRACT_CONTRIBUTIONS') {
     (async () => {
       try {
+        resetGalleryCursor();
+
+        if (/consent\.google\.com\//i.test(window.location.href) || /reject all|rechazar todo|accept all|aceptar todo/i.test(document.body?.innerText || '')) {
+          await clickGoogleConsentButton();
+          await new Promise((resolve) => setTimeout(resolve, 1600));
+        }
+
         await scrollPageForResults();
-        const items = extractFromCurrentPage();
-        sendResponse({ ok: true, items });
+        const maxItems = getMaxGalleryItems(message);
+        const items = await nextPhotoInGallery(maxItems);
+        const directItems = extractFromCurrentPage();
+        const merged = [...items, ...directItems];
+        const deduped = [];
+        const seen = new Set();
+
+        for (const item of merged) {
+          const key = `${(item.imageUrl || item.url || '').toLowerCase()}|${(item.url || '').toLowerCase()}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(item);
+          }
+        }
+
+        sendResponse({ ok: true, items: deduped.slice(0, 200) });
       } catch (error) {
         sendResponse({ ok: false, error: String(error) });
       }
