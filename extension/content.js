@@ -89,6 +89,7 @@ const extractImageUrlFromNode = (node) => {
 const getNodeTitle = (node) => {
   const aria = safeText(node.getAttribute('aria-label') || node.getAttribute('title'));
   const text = safeText(node.innerText || node.textContent || '');
+  const alt = safeText(node.getAttribute ? node.getAttribute('alt') : '');
 
   if (aria && !GENERIC_PHOTO_COUNTER.test(aria)) {
     return aria;
@@ -98,13 +99,17 @@ const getNodeTitle = (node) => {
     return text;
   }
 
-  return aria || text || '';
+  if (alt && !GENERIC_PHOTO_COUNTER.test(alt)) {
+    return alt;
+  }
+
+  return aria || text || alt || '';
 };
 
 const extractFromCurrentPage = () => {
   const seen = new Set();
   const items = [];
-  const candidateNodes = Array.from(document.querySelectorAll('a[href], [data-photo-id], [data-review-id], [role="article"], [role="link"], article, div[jsname]'));
+  const candidateNodes = Array.from(document.querySelectorAll('img, a[href], [data-photo-id], [data-review-id], [role="article"], [role="link"], article, div[jsname]'));
 
   for (const node of candidateNodes) {
     const href = node.href || node.getAttribute('href') || '';
@@ -113,22 +118,23 @@ const extractFromCurrentPage = () => {
     const title = getNodeTitle(node);
     const combinedText = [title, candidateUrl, imageUrl].filter(Boolean).join(' ');
 
-    if (!combinedText || combinedText.length < 20) {
+    if (!imageUrl && !candidateUrl && !title) {
       continue;
     }
 
     const isGenericPhotoCounter = GENERIC_PHOTO_COUNTER.test(title) || /^(foto|photo)\s+\d+\s+(de|of)\s+\d+$/i.test(safeText(node.textContent || ''));
-    const hasRealContributionSignal = isContributionLikeUrl(candidateUrl)
+    const hasRealContributionSignal = Boolean(imageUrl)
+      || isContributionLikeUrl(candidateUrl)
       || !!node.getAttribute('data-photo-id')
       || !!node.getAttribute('data-review-id')
       || /contrib|review|photo|foto|publicaci|valoraci/i.test(combinedText);
 
-    if (!hasRealContributionSignal || isGenericPhotoCounter) {
+    if (!hasRealContributionSignal || (isGenericPhotoCounter && !imageUrl)) {
       continue;
     }
 
     const url = candidateUrl || window.location.href;
-    const key = `${new URL(url).toString()}|${imageUrl}|${title.slice(0, 80)}`;
+    const key = `${imageUrl || url}|${title.slice(0, 80)}`.toLowerCase();
 
     if (seen.has(key)) {
       continue;
@@ -136,7 +142,7 @@ const extractFromCurrentPage = () => {
 
     seen.add(key);
     items.push({
-      title: title.slice(0, 180) || 'Sin título',
+      title: title || 'Sin título',
       text: title || 'Sin descripción disponible',
       url,
       imageUrl: imageUrl || null,
@@ -145,7 +151,7 @@ const extractFromCurrentPage = () => {
     });
   }
 
-  return items.slice(0, 120);
+  return items.slice(0, 200);
 };
 
 const scrollPageForResults = async () => {

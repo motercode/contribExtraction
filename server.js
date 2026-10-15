@@ -62,11 +62,14 @@ const dedupeItems = (items = []) => {
       continue;
     }
 
-    if (isGenericTitle(title) && !/\/maps\/.*(?:contrib|photo|photos|review|reviews)/i.test(url)) {
+    const hasImage = Boolean(imageUrl);
+    const isGeneric = isGenericTitle(title);
+
+    if (isGeneric && !hasImage && !/\/maps\/.*(?:contrib|photo|photos|review|reviews)/i.test(url)) {
       continue;
     }
 
-    const key = `${url}|${imageUrl}|${title}`.toLowerCase();
+    const key = `${imageUrl || url}|${title}`.toLowerCase();
     if (seen.has(key)) {
       continue;
     }
@@ -75,7 +78,7 @@ const dedupeItems = (items = []) => {
     filtered.push(normalized);
   }
 
-  return filtered.slice(0, 120);
+  return filtered.slice(0, 200);
 };
 
 app.use(express.json({ limit: '2mb' }));
