@@ -17,6 +17,18 @@
     "https://www.google.com/maps/*",
     "https://www.google.com/maps/contrib/*"
   ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.google.com/*",
+        "https://maps.google.com/*",
+        "https://www.google.com/maps*",
+        "https://www.google.com/maps/contrib*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_title": "ContribExtraction",
     "default_popup": "popup.html"
