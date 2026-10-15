@@ -1,0 +1,16 @@
+{
+  "name": "contrib-extraction",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Aplicación local para extraer contribuciones públicas de Google Maps con Playwright.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "stop": "node -e \"const http=require('http'); const req=http.request({host:'localhost', port:3000, path:'/', method:'DELETE'}, res=>{console.log('Stop request sent'); process.exit(0);}); req.on('error', () => process.exit(0)); req.end();\""
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "playwright": "^1.49.1"
+  }
+}
