@@ -1,60 +1,42 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ContribExtraction</title>
-    <link rel="stylesheet" href="/public/styles.css" />
+    <title>ContribExtraction Manual</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f3f5f9;
+        color: #1f2937;
+        padding: 32px;
+        margin: 0;
+      }
+      .box {
+        max-width: 740px;
+        margin: 0 auto;
+        background: white;
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 16px 40px rgba(0,0,0,0.06);
+      }
+      h1 { margin-top: 0; }
+      code { background: #eef4ff; padding: 2px 6px; border-radius: 6px; }
+      ul { line-height: 1.7; }
+      a { color: #1a73e8; }
+    </style>
   </head>
   <body>
-    <main class="app-shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Google Maps</p>
-          <h1>ContribExtraction</h1>
-        </div>
-        <a class="secondary" href="/contribuciones.json" target="_blank" rel="noreferrer">Abrir JSON actual</a>
-      </header>
-
-      <section class="panel instructions">
-        <h2>Cómo usar la app</h2>
-        <ol>
-          <li>Haz clic en <strong>Abrir navegador</strong>.</li>
-          <li>Inicia sesión manualmente en Google si aparece la pantalla de acceso.</li>
-          <li>Pega la URL pública del perfil o contribuciones que quieras extraer.</li>
-          <li>Haz clic en <strong>Extraer contribuciones</strong>.</li>
-          <li>El resultado se guarda en <strong>contribuciones.json</strong> en la raíz del proyecto.</li>
-        </ol>
-      </section>
-
-      <section class="panel controls">
-        <div class="form-row">
-          <label for="profile-url">URL pública de Google Maps</label>
-          <input id="profile-url" type="url" placeholder="https://www.google.com/maps/contrib/…" />
-        </div>
-
-        <div class="button-row">
-          <button id="open-browser" class="primary">Abrir navegador</button>
-          <button id="go-to-url" class="secondary">Ir a la URL</button>
-          <button id="extract" class="accent">Extraer contribuciones</button>
-        </div>
-      </section>
-
-      <section class="panel status-panel">
-        <h2>Estado</h2>
-        <div id="status" class="status-box">Esperando acción…</div>
-        <div class="meta">
-          <span id="last-count">0 elementos</span>
-          <span id="last-url">Sin URL</span>
-        </div>
-      </section>
-
-      <section class="panel results">
-        <h2>Vista previa</h2>
-        <div id="preview"></div>
-      </section>
-    </main>
-
-    <script type="module" src="/public/app.js"></script>
+    <div class="box">
+      <h1>ContribExtraction manual</h1>
+      <p>Esta rama usa un navegador real del sistema y una extensión local de Chrome para extraer contribuciones públicas de Google Maps sin automatizar el login.</p>
+      <ul>
+        <li>Inicia sesión manualmente en Google en tu navegador normal.</li>
+        <li>Abre la página de contribuciones o perfiles públicos de Google Maps.</li>
+        <li>Carga la extensión en <code>chrome://extensions</code>.</li>
+        <li>Usa la extensión y el backend local guardará el resultado en <code>contribuciones.json</code>.</li>
+      </ul>
+      <p>Backend local: <a href="http://localhost:3000/contribuciones.json">http://localhost:3000/contribuciones.json</a></p>
+    </div>
   </body>
 </html>

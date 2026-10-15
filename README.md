@@ -1,48 +1,48 @@
 # contribExtraction
 
-Aplicación local con Node.js, Express y Playwright para abrir un navegador visible de Google Maps, permitir el inicio de sesión manual si Google lo solicita, navegar a un perfil público de contribuciones y exportar los resultados a `contribuciones.json`.
+Versión manual del extractor: usa un navegador normal de Chrome/Edge para hacer login manualmente si Google lo requiere y, a continuación, una extensión local de Chrome para extraer las contribuciones y enviarlas a un backend local que guarda `contribuciones.json`.
+
+## Objetivo
+
+- No se usa Playwright para dar login, porque Google detecta el navegador automatizado.
+- Se usa un navegador real del sistema y una extensión local de Chrome.
+- La extensión recoge fotos, textos y enlaces de contribuciones de Google Maps desde la pestaña abierta.
+- El backend local guarda los resultados en `contribuciones.json`.
 
 ## Requisitos
 
-- Node.js 18 o superior
-- navegador Chrome/Chromium disponible para Playwright
+- Node.js 18+
+- Google Chrome o Chromium con permisos de extensión
+- acceso a http://localhost:3000
 
-## Instalación
+## Instalación del backend
 
 ```bash
 npm install
-npx playwright install chromium
-```
-
-## Ejecutar la app
-
-```bash
 npm start
 ```
 
-Abre la URL local:
+A continuación abre:
 
 ```text
 http://localhost:3000
 ```
 
+## Instalación de la extensión
+
+1. Abre `chrome://extensions`
+2. Activa "Modo desarrollador"
+3. Pulsa "Cargar extensión sin empaquetar"
+4. Selecciona la carpeta `extension/` de este repositorio
+
 ## Flujo recomendado
 
-1. Pulsa "Abrir navegador".
-2. Si Google muestra el consentimiento de cookies, la app intenta pulsar automáticamente "Rechazar todo" (o "Aceptar todo" como respaldo).
-3. Si Google pide iniciar sesión, haz el login manualmente dentro del navegador visible.
-4. Pega una URL pública de Google Maps del perfil o contribuciones que quieras recopilar.
-5. Pulsa "Extraer contribuciones".
-6. La app hace scroll progresivo y guarda los resultados en `contribuciones.json` en la raíz del proyecto.
+1. Abre el navegador Chrome real del sistema y, si Google pide login, haz login manualmente.
+2. Navega a tu perfil público de Google Maps o a la sección de contribuciones.
+3. Abre la extensión y pulsa "Extraer desde pestaña actual".
+4. La extensión recorre la página con scroll y extrae fotos, textos y enlaces.
+5. El backend guarda el JSON en `contribuciones.json`.
 
 ## Nota importante
 
-La aplicación solo usa navegación real del navegador controlado por Playwright y guarda una sesión persistente en `browser-profile/` para que el usuario pueda hacer login manualmente dentro del navegador visible sin perder la sesión.
-
-No intenta evitar CAPTCHA, autenticación, políticas de Google ni restricciones de acceso.
-
-Cuando quieras validar el servidor en un entorno sin GUI, puedes arrancarlo con:
-
-```bash
-PLAYWRIGHT_HEADLESS=true npm start
-```
+Esta solución es "manual" porque Google bloquea navegadores automatizados. La extensión solo funciona sobre un navegador normal del usuario, no sobre Chromium controlado por Playwright.

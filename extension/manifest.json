@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "ContribExtraction Manual",
+  "version": "1.0.0",
+  "description": "Extrae contribuciones públicas de Google Maps desde un navegador real y las envía a un backend local.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "tabs",
+    "downloads"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "https://www.google.com/*",
+    "https://maps.google.com/*",
+    "https://www.google.com/maps/*",
+    "https://www.google.com/maps/contrib/*"
+  ],
+  "action": {
+    "default_title": "ContribExtraction",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
