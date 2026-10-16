@@ -9,15 +9,27 @@ const setStatus = (message, isError = false) => {
 };
 
 const saveToBackend = async (items) => {
-  const response = await fetch('http://localhost:3000/api/save', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items })
-  });
+  let response;
 
-  const result = await response.json();
-  if (!response.ok) {
-    throw new Error(result.error || 'No se pudo guardar la exportación.');
+  try {
+    response = await fetch('http://localhost:3000/api/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+  } catch (error) {
+    throw new Error('No se pudo contactar con el backend local en http://localhost:3000. Inicia el servidor con "npm start" antes de extraer.');
+  }
+
+  let result = null;
+  try {
+    result = await response.json();
+  } catch {
+    result = { ok: false, error: 'Respuesta del backend no válida.' };
+  }
+
+  if (!response.ok || result?.ok === false) {
+    throw new Error(result?.error || 'No se pudo guardar la exportación.');
   }
 
   return result;
@@ -58,7 +70,12 @@ chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
     return;
   }
 
-  if (tab.url.includes('google.com/maps') || tab.url.includes('maps.google.com')) {
+  if (
+    tab.url.includes('google.com/maps')
+    || tab.url.includes('maps.google.com')
+    || tab.url.includes('consent.google.com')
+    || tab.url.includes('continue=https://www.google.com/maps')
+  ) {
     setStatus('Listo para extraer contribuciones.');
   } else {
     setStatus('La pestaña actual no parece ser Google Maps.');

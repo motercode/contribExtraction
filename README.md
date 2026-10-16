@@ -42,6 +42,21 @@ http://localhost:3000
 3. Abre la extensión y pulsa "Extraer desde pestaña actual".
 4. La extensión recorre la página con scroll y extrae fotos, textos y enlaces.
 5. El backend guarda el JSON en `contribuciones.json`.
+   - El formato es el mismo que el test: `{ "total": number, "items": [...] }` con `index`, `url`, `imageUrl`, `coordinates` y `capturedAt`.
+
+## Verificación Playwright de 10 fotos
+
+Para comparar el flujo real de Google Maps con un caso de prueba controlado, existe una verificación mínima que abre el perfil público y recopila los primeros 10 elementos secuencialmente:
+
+```bash
+npm run test:maps-11
+```
+
+Esto genera el archivo `contribuciones_test.json` con los 10 resultados esperados y sirve como referencia para el algoritmo manual y la extensión.
+
+## Regla importante sobre la galería
+
+La navegación correcta no debe recargar la página ni volver atrás. La galería de Google Maps se comporta como una SPA: los botones numerados (`Foto 1 de N`, `Photo 2 of N`) siguen existiendo en el DOM y deben clickarse secuencialmente sin `goBack()`. Si la lista cambia de estructura, también se soporta el selector `data-photo-bucket-iden` como fallback para continuar con el siguiente item.
 
 ## Nota importante
 

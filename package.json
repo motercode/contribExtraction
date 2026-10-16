@@ -7,9 +7,13 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "stop": "node -e \"const http=require('http'); const req=http.request({host:'localhost', port:3000, path:'/', method:'DELETE'}, res=>{console.log('Stop request sent'); process.exit(0);}); req.on('error', () => process.exit(0)); req.end();\""
+    "stop": "node -e \"const http=require('http'); const req=http.request({host:'localhost', port:3000, path:'/', method:'DELETE'}, res=>{console.log('Stop request sent'); process.exit(0);}); req.on('error', () => process.exit(0)); req.end();\"",
+    "test:maps-11": "node scripts/playwright-verify-11.js"
   },
   "dependencies": {
     "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
   }
 }

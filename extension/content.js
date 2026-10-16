@@ -313,14 +313,20 @@ const resetGalleryCursor = () => {
 };
 
 const findGalleryPhotoButtons = () => {
-  const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-
-  return buttons.filter((button) => {
+  const labeled = Array.from(document.querySelectorAll('button, [role="button"], [data-photo-bucket-iden], [data-photo-id], [data-review-id], a[href]')).filter((button) => {
     const label = safeText(button.getAttribute('aria-label') || button.textContent || '');
     const isGalleryCounter = /foto\s+\d+\s+de\s+\d+|photo\s+\d+\s+of\s+\d+/i.test(label);
     const isActionLabel = /acciones de la foto|actions of the photo|foto de perfil|profile photo/i.test(label);
-    return isGalleryCounter && !isActionLabel;
+    const hasBucketId = !!button.getAttribute('data-photo-bucket-iden') || !!button.getAttribute('data-photo-id') || !!button.getAttribute('data-review-id');
+    return (isGalleryCounter || hasBucketId) && !isActionLabel;
   });
+
+  if (labeled.length > 0) {
+    return labeled;
+  }
+
+  // Fallback: .xUc6Hf elements inside photo-card containers (photos 7-10 when not fully loaded)
+  return Array.from(document.querySelectorAll('.EGN8xd > .WY21Hc > .xUc6Hf, .xUc6Hf, [data-photo-bucket-iden]'));
 };
 
 const waitForUrlChange = async (previousUrl, timeoutMs = 12000) => {
@@ -430,8 +436,6 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
   const seen = new Set();
   let noProgressCount = 0;
 
-  // Capture all thumbnail srcs upfront — they persist in the SPA DOM throughout the session.
-  // Index matches galleryCursor, so thumbnailSrcs[galleryCursor] is always the right imageUrl.
   const thumbnailSrcs = captureViewerThumbnailSrcs();
 
   for (let attempt = 0; attempt < 120 && items.length < maxItems; attempt += 1) {
@@ -440,28 +444,37 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
       break;
     }
 
-    const index = Math.min(galleryCursor, galleryButtons.length - 1);
-    const button = galleryButtons[index];
-    const previousUrl = window.location.href;
-
-    if (!button || typeof button.click !== 'function') {
+    if (galleryCursor >= galleryButtons.length) {
       break;
     }
 
-    // Pre-capture imageUrl for this cursor position before the click changes the URL
-    const preImageUrl = thumbnailSrcs[galleryCursor] || null;
+    const button = galleryButtons[galleryCursor];
+    const previousUrl = window.location.href;
 
+    if (!button) {
+      break;
+    }
+
+    const clickableTarget = button instanceof Element && button.tagName !== 'A'
+      ? button.closest('button, [role="button"], a[href], [data-photo-bucket-iden]') || button
+      : button;
+
+    if (!clickableTarget || typeof clickableTarget.click !== 'function') {
+      break;
+    }
+
+    const preImageUrl = thumbnailSrcs[galleryCursor] || null;
     const beforeCount = items.length;
-    button.scrollIntoView({ block: 'center', inline: 'center' });
-    button.click();
+
+    clickableTarget.scrollIntoView({ block: 'center', inline: 'center' });
+    clickableTarget.click();
 
     const afterUrl = await waitForUrlChange(previousUrl, 12000);
-    // Wait for the URL to fully settle (g_ep and other params finalized by the SPA)
     const finalUrl = await waitForUrlStable(5000, 1000);
     const detailItem = collectCurrentDetailItem(finalUrl, preImageUrl);
 
     if (detailItem) {
-      const key = `${(detailItem.imageUrl || detailItem.url).toLowerCase()}|${detailItem.url.toLowerCase()}`;
+      const key = `${detailItem.url.toLowerCase()}`;
       if (!seen.has(key)) {
         seen.add(key);
         items.push(detailItem);
@@ -473,6 +486,7 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
     if (afterUrl === previousUrl) {
       const fallbackNext = findNextPhotoButton();
       if (fallbackNext) {
+        fallbackNext.scrollIntoView({ block: 'center', inline: 'center' });
         fallbackNext.click();
         await new Promise((resolve) => setTimeout(resolve, 1200));
       }
@@ -484,7 +498,7 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
       noProgressCount = 0;
     }
 
-    if (noProgressCount >= 6) {
+    if (galleryCursor >= galleryButtons.length || noProgressCount >= 6) {
       break;
     }
 
@@ -548,12 +562,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const maxItems = getMaxGalleryItems(message);
         const items = await nextPhotoInGallery(maxItems);
         const directItems = extractFromCurrentPage();
-        const merged = [...items, ...directItems];
+        const merged = items.length > 0 ? items : directItems;
         const deduped = [];
         const seen = new Set();
 
         for (const item of merged) {
-          const key = `${(item.imageUrl || item.url || '').toLowerCase()}|${(item.url || '').toLowerCase()}`;
+          const key = `${(item.url || '').toLowerCase()}`;
           if (!seen.has(key)) {
             seen.add(key);
             deduped.push(item);
