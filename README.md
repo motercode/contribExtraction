@@ -77,3 +77,11 @@ La navegación correcta no debe recargar la página ni volver atrás. La galerí
 ## Nota importante
 
 Esta solución es "manual" porque Google bloquea navegadores automatizados. La extensión solo funciona sobre un navegador normal del usuario, no sobre Chromium controlado por Playwright.
+
+## Logs en tiempo real
+
+El backend expone un receptor de logs en `POST /api/log` para que la extensión envíe eventos de proceso en tiempo real. Cada ejecución usa un `sessionId` para agrupar los eventos y medir dónde se consume más tiempo.
+
+También puedes consultar los últimos eventos con `GET /api/logs?limit=200`.
+
+Los logs se guardan en `contribuciones_logs.jsonl` además de quedar visibles en la consola del backend.

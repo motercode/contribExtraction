@@ -10,6 +10,36 @@
     <main class="popup-shell">
       <h1>ContribExtraction</h1>
       <p id="status">Abre Google Maps y luego extrae la pestaña actual.</p>
+      <section class="settings" aria-label="Configuración de extracción">
+        <label class="setting">
+          <span>Máx. elementos</span>
+          <select id="max-items"></select>
+        </label>
+        <label class="setting">
+          <span>Pausa entre fotos</span>
+          <select id="gallery-item-delay-ms"></select>
+        </label>
+        <label class="setting">
+          <span>Pausa de scroll</span>
+          <select id="scroll-step-delay-ms"></select>
+        </label>
+        <label class="setting">
+          <span>Espera de cambio de URL</span>
+          <select id="url-change-timeout-ms"></select>
+        </label>
+        <label class="setting">
+          <span>Espera de estabilidad</span>
+          <select id="url-stable-timeout-ms"></select>
+        </label>
+        <label class="setting">
+          <span>Pausa tras consentimiento</span>
+          <select id="consent-post-click-delay-ms"></select>
+        </label>
+        <label class="setting">
+          <span>Pausa de fallback</span>
+          <select id="gallery-fallback-click-delay-ms"></select>
+        </label>
+      </section>
       <div class="actions">
         <button id="open-maps">Abrir Google Maps</button>
         <button id="capture" class="primary">Extraer desde esta pestaña</button>

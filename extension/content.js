@@ -23,6 +23,107 @@ const GOOGLE_META_PATTERNS = [
   /google\.com\/maps\?hl=/i,
   /google\.com\/maps\/contrib\/.+\/photos\/@.*?data=.*entry=ttu/i
 ];
+const CONSENT_BUTTON_CLICK_DELAY_MS = 1400;
+const CONSENT_BUTTON_RETRY_DELAY_MS = 300;
+const CONSENT_POST_CLICK_DELAY_MS = 1600;
+const URL_CHANGE_POLL_DELAY_MS = 250;
+const URL_STABLE_POLL_DELAY_MS = 300;
+const URL_STABLE_TIMEOUT_MS = 5000;
+const URL_STABLE_WINDOW_MS = 1000;
+const URL_CHANGE_TIMEOUT_MS = 12000;
+const FULL_URL_RECOVERY_STEP_COUNT = 3;
+const FULL_URL_RECOVERY_TIMEOUT_MS = 1500;
+const GALLERY_FALLBACK_CLICK_DELAY_MS = 1200;
+const GALLERY_ITEM_DELAY_MS = 800;
+const SCROLL_STEP_DELAY_MS = 1200;
+const SCROLL_INITIAL_STEP_PX = 700;
+const SCROLL_NO_PROGRESS_LIMIT = 4;
+const GALLERY_NO_PROGRESS_LIMIT = 6;
+const GALLERY_MAX_ATTEMPTS = 120;
+
+const EXTRACTION_CONFIG_DEFAULTS = {
+  maxItems: 200,
+  consentButtonClickDelayMs: CONSENT_BUTTON_CLICK_DELAY_MS,
+  consentButtonRetryDelayMs: CONSENT_BUTTON_RETRY_DELAY_MS,
+  consentPostClickDelayMs: CONSENT_POST_CLICK_DELAY_MS,
+  urlChangePollDelayMs: URL_CHANGE_POLL_DELAY_MS,
+  urlStablePollDelayMs: URL_STABLE_POLL_DELAY_MS,
+  urlStableTimeoutMs: URL_STABLE_TIMEOUT_MS,
+  urlStableWindowMs: URL_STABLE_WINDOW_MS,
+  urlChangeTimeoutMs: URL_CHANGE_TIMEOUT_MS,
+  galleryFallbackClickDelayMs: GALLERY_FALLBACK_CLICK_DELAY_MS,
+  galleryItemDelayMs: GALLERY_ITEM_DELAY_MS,
+  scrollStepDelayMs: SCROLL_STEP_DELAY_MS,
+  scrollInitialStepPx: SCROLL_INITIAL_STEP_PX,
+  scrollNoProgressLimit: SCROLL_NO_PROGRESS_LIMIT,
+  galleryNoProgressLimit: GALLERY_NO_PROGRESS_LIMIT,
+  galleryMaxAttempts: GALLERY_MAX_ATTEMPTS
+};
+
+let activeExtractionConfig = { ...EXTRACTION_CONFIG_DEFAULTS };
+let activeExtractionSessionId = null;
+let activeExtractionStartedAt = 0;
+
+const toFiniteNumber = (value, fallback, min, max) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, parsed));
+};
+
+const buildExtractionConfig = (overrides = {}) => ({
+  maxItems: toFiniteNumber(overrides.maxItems, EXTRACTION_CONFIG_DEFAULTS.maxItems, 1, 5000),
+  consentButtonClickDelayMs: toFiniteNumber(overrides.consentButtonClickDelayMs, EXTRACTION_CONFIG_DEFAULTS.consentButtonClickDelayMs, 0, 30000),
+  consentButtonRetryDelayMs: toFiniteNumber(overrides.consentButtonRetryDelayMs, EXTRACTION_CONFIG_DEFAULTS.consentButtonRetryDelayMs, 0, 10000),
+  consentPostClickDelayMs: toFiniteNumber(overrides.consentPostClickDelayMs, EXTRACTION_CONFIG_DEFAULTS.consentPostClickDelayMs, 0, 30000),
+  urlChangePollDelayMs: toFiniteNumber(overrides.urlChangePollDelayMs, EXTRACTION_CONFIG_DEFAULTS.urlChangePollDelayMs, 0, 5000),
+  urlStablePollDelayMs: toFiniteNumber(overrides.urlStablePollDelayMs, EXTRACTION_CONFIG_DEFAULTS.urlStablePollDelayMs, 0, 5000),
+  urlStableTimeoutMs: toFiniteNumber(overrides.urlStableTimeoutMs, EXTRACTION_CONFIG_DEFAULTS.urlStableTimeoutMs, 100, 60000),
+  urlStableWindowMs: toFiniteNumber(overrides.urlStableWindowMs, EXTRACTION_CONFIG_DEFAULTS.urlStableWindowMs, 0, 20000),
+  urlChangeTimeoutMs: toFiniteNumber(overrides.urlChangeTimeoutMs, EXTRACTION_CONFIG_DEFAULTS.urlChangeTimeoutMs, 100, 60000),
+  galleryFallbackClickDelayMs: toFiniteNumber(overrides.galleryFallbackClickDelayMs, EXTRACTION_CONFIG_DEFAULTS.galleryFallbackClickDelayMs, 0, 30000),
+  galleryItemDelayMs: toFiniteNumber(overrides.galleryItemDelayMs, EXTRACTION_CONFIG_DEFAULTS.galleryItemDelayMs, 0, 30000),
+  scrollStepDelayMs: toFiniteNumber(overrides.scrollStepDelayMs, EXTRACTION_CONFIG_DEFAULTS.scrollStepDelayMs, 0, 30000),
+  scrollInitialStepPx: toFiniteNumber(overrides.scrollInitialStepPx, EXTRACTION_CONFIG_DEFAULTS.scrollInitialStepPx, 100, 10000),
+  scrollNoProgressLimit: toFiniteNumber(overrides.scrollNoProgressLimit, EXTRACTION_CONFIG_DEFAULTS.scrollNoProgressLimit, 1, 20),
+  galleryNoProgressLimit: toFiniteNumber(overrides.galleryNoProgressLimit, EXTRACTION_CONFIG_DEFAULTS.galleryNoProgressLimit, 1, 20),
+  galleryMaxAttempts: toFiniteNumber(overrides.galleryMaxAttempts, EXTRACTION_CONFIG_DEFAULTS.galleryMaxAttempts, 1, 5000)
+});
+
+const setActiveExtractionConfig = (overrides = {}) => {
+  activeExtractionConfig = buildExtractionConfig(overrides);
+  return activeExtractionConfig;
+};
+
+const getActiveExtractionConfig = () => activeExtractionConfig;
+
+const emitSlowStepLog = (step, data = {}) => {
+  emitProcessLog(step, data, 'warn');
+};
+
+const emitProcessLog = (step, data = {}, severity = 'info') => {
+  try {
+    chrome.runtime.sendMessage(
+      {
+        type: 'LOG_EVENT',
+        payload: {
+          source: 'content',
+          sessionId: activeExtractionSessionId,
+          step,
+          severity,
+          timestamp: new Date().toISOString(),
+          elapsedMs: activeExtractionStartedAt ? Date.now() - activeExtractionStartedAt : null,
+          data
+        }
+      },
+      () => void chrome.runtime.lastError
+    );
+  } catch {
+    // Logging must never interrupt extraction.
+  }
+};
 
 const isGoogleMapsPage = () => {
   const url = window.location.href || '';
@@ -31,6 +132,7 @@ const isGoogleMapsPage = () => {
 };
 
 const clickGoogleConsentButton = async () => {
+  const config = getActiveExtractionConfig();
   const maxAttempts = 20;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -41,11 +143,11 @@ const clickGoogleConsentButton = async () => {
 
     if (consentNode) {
       consentNode.click();
-      await new Promise((resolve) => setTimeout(resolve, 1400));
+      await new Promise((resolve) => setTimeout(resolve, config.consentButtonClickDelayMs));
       return true;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, config.consentButtonRetryDelayMs));
   }
 
   return false;
@@ -76,6 +178,38 @@ const cleanImageUrl = (value) => {
 
   const match = String(value).match(/https?:\/\/[^\s"']+/i);
   return match ? match[0].replace(/&amp;/g, '&') : '';
+};
+
+const toCanonicalMapsUrl = (value = '') => {
+  let url = String(value || '').trim();
+  if (!url) {
+    return '';
+  }
+
+  url = url.replace(
+    /https:\/\/www\.google\.com\/maps\/contrib\/\d+\/photos\//i,
+    'https://www.google.com/maps/'
+  );
+  url = url.replace(/,(-?\d+(?:\.\d+)?)r\//i, '/');
+
+  const queryIndex = url.indexOf('?');
+  const base = queryIndex >= 0 ? url.slice(0, queryIndex) : url;
+  const query = queryIndex >= 0 ? url.slice(queryIndex) : '';
+  const dataMatch = base.match(/^(.*\/data=)(.*)$/i);
+  if (!dataMatch) {
+    return url;
+  }
+
+  const dataPrefix = dataMatch[1];
+  let dataPayload = dataMatch[2];
+
+  dataPayload = dataPayload.replace(/!4m3!8m2!3m1!1e1$/i, '');
+  dataPayload = dataPayload.replace(/^!3m7!1e1!3m5!/i, '!3m8!1e1!3m6!');
+  if (!/!3e\d+!/i.test(dataPayload)) {
+    dataPayload = dataPayload.replace(/(!2e10)(!)/i, '$1!3e11$2');
+  }
+
+  return `${dataPrefix}${dataPayload}${query}`;
 };
 
 const extractCoordinatesFromUrl = (url = '') => {
@@ -331,6 +465,7 @@ const extractFromCurrentPage = () => {
       title: finalTitle,
       text: finalTitle,
       url,
+      mapsUrlCanonical: toCanonicalMapsUrl(url),
       imageUrl: imageUrl || null,
       sourceUrl: window.location.href,
       coordinates: coordinates || null,
@@ -382,27 +517,29 @@ const findGalleryPhotoButtons = () => {
   return Array.from(document.querySelectorAll('.EGN8xd > .WY21Hc > .xUc6Hf, .xUc6Hf, [data-photo-bucket-iden]'));
 };
 
-const waitForUrlChange = async (previousUrl, timeoutMs = 12000) => {
+const waitForUrlChange = async (previousUrl, timeoutMs = getActiveExtractionConfig().urlChangeTimeoutMs) => {
+  const config = getActiveExtractionConfig();
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
     if (window.location.href !== previousUrl) {
       return window.location.href;
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, config.urlChangePollDelayMs));
   }
 
   return window.location.href;
 };
 
 // Waits until window.location.href stops changing for stableMs, then returns it.
-const waitForUrlStable = async (timeoutMs = 5000, stableMs = 1000) => {
+const waitForUrlStable = async (timeoutMs = getActiveExtractionConfig().urlStableTimeoutMs, stableMs = getActiveExtractionConfig().urlStableWindowMs) => {
+  const config = getActiveExtractionConfig();
   const startedAt = Date.now();
   let lastUrl = window.location.href;
   let lastChangeAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, config.urlStablePollDelayMs));
     const current = window.location.href;
     if (current !== lastUrl) {
       lastUrl = current;
@@ -415,7 +552,8 @@ const waitForUrlStable = async (timeoutMs = 5000, stableMs = 1000) => {
   return window.location.href;
 };
 
-const waitForFullContributionUrl = async (previousUrl, timeoutMs = 12000) => {
+const waitForFullContributionUrl = async (previousUrl, timeoutMs = getActiveExtractionConfig().urlChangeTimeoutMs) => {
+  const config = getActiveExtractionConfig();
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
@@ -423,7 +561,7 @@ const waitForFullContributionUrl = async (previousUrl, timeoutMs = 12000) => {
     if (current !== previousUrl && isFullContributionDetailUrl(current)) {
       return current;
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, config.urlChangePollDelayMs));
   }
 
   return '';
@@ -464,6 +602,7 @@ const collectCurrentDetailItem = (currentUrl = window.location.href, preImageUrl
     title: 'Contribución de Google Maps',
     text: 'Contribución de Google Maps',
     url: normalizedUrl,
+    mapsUrlCanonical: toCanonicalMapsUrl(normalizedUrl),
     imageUrl: imageUrl || null,
     sourceUrl: window.location.href,
     coordinates,
@@ -511,28 +650,63 @@ const findNextPhotoButton = () => {
 };
 
 const getMaxGalleryItems = (message = {}) => {
-  const requested = Number(message.maxItems);
+  const requested = Number(message.maxItems ?? message.config?.maxItems);
   if (Number.isFinite(requested) && requested > 0) {
     return Math.min(requested, 5000);
   }
 
-  return Number.MAX_SAFE_INTEGER;
+  return getActiveExtractionConfig().maxItems;
+};
+
+const summarizeNodeForLog = (node) => {
+  if (!node) {
+    return null;
+  }
+
+  const tagName = node.tagName || null;
+  const ariaLabel = safeText(node.getAttribute?.('aria-label') || '');
+  const title = safeText(node.getAttribute?.('title') || '');
+  const text = safeText(node.textContent || '');
+  const href = node.getAttribute?.('href') || node.href || null;
+  const dataPhotoBucketIden = node.getAttribute?.('data-photo-bucket-iden') || null;
+  const dataPhotoId = node.getAttribute?.('data-photo-id') || null;
+  const dataReviewId = node.getAttribute?.('data-review-id') || null;
+
+  return {
+    tagName,
+    ariaLabel: ariaLabel || null,
+    title: title || null,
+    text: text ? text.slice(0, 120) : null,
+    href: href ? String(href).slice(0, 240) : null,
+    dataPhotoBucketIden,
+    dataPhotoId,
+    dataReviewId
+  };
 };
 
 const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
+  const config = getActiveExtractionConfig();
   const items = [];
   const seen = new Set();
   let noProgressCount = 0;
+  let recoveryModeStepsRemaining = 0;
 
   const thumbnailSrcs = captureViewerThumbnailSrcs();
+  emitProcessLog('gallery_started', {
+    maxItems,
+    galleryMaxAttempts: config.galleryMaxAttempts,
+    galleryNoProgressLimit: config.galleryNoProgressLimit
+  });
 
-  for (let attempt = 0; attempt < 120 && items.length < maxItems; attempt += 1) {
+  for (let attempt = 0; attempt < config.galleryMaxAttempts && items.length < maxItems; attempt += 1) {
     const galleryButtons = findGalleryPhotoButtons();
     if (!galleryButtons.length) {
+      emitProcessLog('gallery_stopped_no_buttons', { attempt });
       break;
     }
 
     if (galleryCursor >= galleryButtons.length) {
+      emitProcessLog('gallery_stopped_cursor_limit', { attempt, galleryCursor, buttonCount: galleryButtons.length });
       break;
     }
 
@@ -553,16 +727,97 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
 
     const preImageUrl = thumbnailSrcs[galleryCursor] || null;
     const beforeCount = items.length;
+    const stepStartedAt = Date.now();
+    const timingMode = recoveryModeStepsRemaining > 0 ? 'recovery' : 'normal';
+    const fullUrlTimeoutMs = recoveryModeStepsRemaining > 0 ? FULL_URL_RECOVERY_TIMEOUT_MS : config.urlChangeTimeoutMs;
+    const targetSummary = summarizeNodeForLog(clickableTarget);
+
+    if (recoveryModeStepsRemaining > 0) {
+      recoveryModeStepsRemaining -= 1;
+    }
+
+    emitProcessLog('gallery_step_start', {
+      attempt,
+      galleryCursor,
+      timingMode,
+      recoveryModeStepsRemaining,
+      maxItems,
+      buttonCount: galleryButtons.length,
+      noProgressCount,
+      previousUrl,
+      preImageUrl: preImageUrl || null,
+      target: targetSummary
+    });
 
     clickableTarget.scrollIntoView({ block: 'center', inline: 'center' });
+    emitProcessLog('gallery_click_dispatched', {
+      attempt,
+      galleryCursor,
+      timingMode,
+      recoveryModeStepsRemaining,
+      target: targetSummary,
+      preClickUrl: window.location.href
+    });
     clickableTarget.click();
 
-    const afterUrl = await waitForUrlChange(previousUrl, 12000);
-    const fullUrl = await waitForFullContributionUrl(previousUrl, 12000);
-    const finalUrl = await waitForUrlStable(5000, 1000);
+    const urlChangeStartedAt = Date.now();
+    const changedUrl = await waitForUrlChange(previousUrl, config.urlChangeTimeoutMs);
+    const urlChangeElapsedMs = Date.now() - urlChangeStartedAt;
+    const urlChangeSucceeded = Boolean(changedUrl && changedUrl !== previousUrl);
+
+    const fullUrlStartedAt = Date.now();
+    const fullContributionUrl = await waitForFullContributionUrl(previousUrl, fullUrlTimeoutMs);
+    const fullUrlElapsedMs = Date.now() - fullUrlStartedAt;
+    const fullUrlSucceeded = Boolean(fullContributionUrl);
+
+    const urlStableStartedAt = Date.now();
+    const stableUrl = await waitForUrlStable(config.urlStableTimeoutMs, config.urlStableWindowMs);
+    const urlStableElapsedMs = Date.now() - urlStableStartedAt;
+
+    const finalUrl = window.location.href;
+    const finalUrlChanged = finalUrl !== previousUrl;
     const buttonCandidates = getNodeContributionUrlCandidates(clickableTarget);
-    const bestUrl = pickBestContributionUrl([fullUrl, finalUrl, afterUrl, ...buttonCandidates, previousUrl]) || finalUrl;
+    const bestUrl = pickBestContributionUrl([finalUrl, ...buttonCandidates, previousUrl]) || finalUrl;
     const detailItem = collectCurrentDetailItem(bestUrl, preImageUrl);
+
+    emitProcessLog('gallery_wait_summary', {
+      attempt,
+      galleryCursor,
+      timingMode,
+      recoveryModeStepsRemaining,
+      fullUrlTimeoutMs,
+      previousUrl,
+      changedUrl: changedUrl || null,
+      fullContributionUrl: fullContributionUrl || null,
+      stableUrl: stableUrl || null,
+      finalUrl,
+      urlChangeSucceeded,
+      fullUrlSucceeded,
+      finalUrlChanged,
+      urlChangeElapsedMs,
+      fullUrlElapsedMs,
+      urlStableElapsedMs,
+      target: targetSummary,
+      preImageUrl: preImageUrl || null,
+      detailItemCaptured: Boolean(detailItem)
+    });
+
+    const slowSignals = [];
+    if (urlChangeElapsedMs >= Math.max(3000, config.urlChangeTimeoutMs * 0.7)) {
+      slowSignals.push('url_change_wait_slow');
+    }
+    if (fullUrlElapsedMs >= Math.max(3000, config.urlChangeTimeoutMs * 0.7)) {
+      slowSignals.push('full_url_wait_slow');
+    }
+    if (urlStableElapsedMs >= Math.max(1500, config.urlStableTimeoutMs * 0.5)) {
+      slowSignals.push('url_stable_wait_slow');
+    }
+    if (!finalUrlChanged) {
+      slowSignals.push('url_not_changed_after_click');
+    }
+    if (!detailItem) {
+      slowSignals.push('detail_item_missing');
+    }
 
     if (detailItem) {
       const key = `${detailItem.url.toLowerCase()}`;
@@ -574,12 +829,55 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
 
     galleryCursor += 1;
 
-    if (afterUrl === previousUrl) {
+    if (finalUrl === previousUrl) {
       const fallbackNext = findNextPhotoButton();
       if (fallbackNext) {
+        emitProcessLog('gallery_fallback_click', {
+          attempt,
+          galleryCursor,
+          timingMode,
+          fallbackTarget: summarizeNodeForLog(fallbackNext),
+          reason: 'final_url_unchanged'
+        });
         fallbackNext.scrollIntoView({ block: 'center', inline: 'center' });
         fallbackNext.click();
-        await new Promise((resolve) => setTimeout(resolve, 1200));
+        await new Promise((resolve) => setTimeout(resolve, config.galleryFallbackClickDelayMs));
+      }
+    }
+
+    emitProcessLog('gallery_step_finished', {
+      attempt,
+      galleryCursor,
+      itemCaptured: Boolean(detailItem),
+      itemsCollected: items.length,
+      urlChangeElapsedMs,
+      fullUrlElapsedMs,
+      urlStableElapsedMs,
+      stepElapsedMs: Date.now() - stepStartedAt,
+      finalUrlChanged,
+      hasPreImage: Boolean(preImageUrl)
+    });
+
+    if (slowSignals.length) {
+      emitSlowStepLog('gallery_step_slow', {
+        attempt,
+        galleryCursor,
+        timingMode,
+        recoveryModeStepsRemaining,
+        fullUrlTimeoutMs,
+        slowSignals,
+        urlChangeElapsedMs,
+        fullUrlElapsedMs,
+        urlStableElapsedMs,
+        stepElapsedMs: Date.now() - stepStartedAt,
+        finalUrlChanged,
+        previousUrl,
+        finalUrl,
+        hasPreImage: Boolean(preImageUrl)
+      });
+
+      if (slowSignals.includes('full_url_wait_slow')) {
+        recoveryModeStepsRemaining = FULL_URL_RECOVERY_STEP_COUNT;
       }
     }
 
@@ -589,7 +887,7 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
       noProgressCount = 0;
     }
 
-    if (galleryCursor >= galleryButtons.length || noProgressCount >= 6) {
+    if (galleryCursor >= galleryButtons.length || noProgressCount >= config.galleryNoProgressLimit) {
       break;
     }
 
@@ -597,22 +895,33 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
       break;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, config.galleryItemDelayMs));
   }
 
+  emitProcessLog('gallery_finished', { itemsCollected: items.length, galleryCursor });
   return items;
 };
 
 const scrollPageForResults = async () => {
+  const config = getActiveExtractionConfig();
   const target = findScrollableElement();
   let previous = 0;
   let noProgress = 0;
+  let stepsRun = 0;
+
+  emitProcessLog('scroll_started', {
+    scrollInitialStepPx: config.scrollInitialStepPx,
+    scrollStepDelayMs: config.scrollStepDelayMs,
+    scrollNoProgressLimit: config.scrollNoProgressLimit,
+    targetTag: target?.tagName || null
+  });
 
   for (let step = 0; step < 24; step += 1) {
     const before = target.scrollTop || 0;
-    const delta = Math.max(700, target.clientHeight || 800);
+    const delta = Math.max(config.scrollInitialStepPx, target.clientHeight || 800);
     target.scrollTop = before + delta;
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await new Promise((resolve) => setTimeout(resolve, config.scrollStepDelayMs));
+    stepsRun += 1;
 
     const after = target.scrollTop || 0;
     if (Math.abs(after - before) < 2) {
@@ -627,10 +936,24 @@ const scrollPageForResults = async () => {
 
     previous = target.scrollHeight || 0;
 
-    if (noProgress >= 4) {
+    if (noProgress >= config.scrollNoProgressLimit) {
       break;
     }
   }
+
+  emitProcessLog('scroll_finished', {
+    stepsRun,
+    finalScrollTop: target.scrollTop || 0,
+    finalScrollHeight: target.scrollHeight || 0,
+    noProgressCount: noProgress
+  });
+
+  return {
+    stepsRun,
+    noProgressCount: noProgress,
+    finalScrollTop: target.scrollTop || 0,
+    finalScrollHeight: target.scrollHeight || 0
+  };
 };
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -641,16 +964,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === 'EXTRACT_CONTRIBUTIONS') {
     (async () => {
+      const previousConfig = getActiveExtractionConfig();
+      setActiveExtractionConfig(message.config || {});
+      activeExtractionSessionId = String(message.config?.sessionId || `session-${Date.now()}`);
+      activeExtractionStartedAt = Date.now();
+
       try {
         resetGalleryCursor();
+        emitProcessLog('extraction_started', {
+          url: window.location.href,
+          config: getActiveExtractionConfig(),
+          isConsentPage: /consent\.google\.com\//i.test(window.location.href)
+        });
 
         if (/consent\.google\.com\//i.test(window.location.href) || /reject all|rechazar todo|accept all|aceptar todo/i.test(document.body?.innerText || '')) {
+          emitProcessLog('consent_flow_detected', {});
+          const consentStartedAt = Date.now();
           await clickGoogleConsentButton();
-          await new Promise((resolve) => setTimeout(resolve, 1600));
+          const consentClickElapsedMs = Date.now() - consentStartedAt;
+          emitProcessLog('consent_flow_completed', { consentClickElapsedMs });
+          await new Promise((resolve) => setTimeout(resolve, getActiveExtractionConfig().consentPostClickDelayMs));
         }
 
-        await scrollPageForResults();
+        const scrollStats = await scrollPageForResults();
         const maxItems = getMaxGalleryItems(message);
+        emitProcessLog('gallery_phase_prepared', { maxItems, scrollStats });
         const items = await nextPhotoInGallery(maxItems);
         const directItems = extractFromCurrentPage();
         const merged = items.length > 0 ? items : directItems;
@@ -665,9 +1003,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }
         }
 
-        sendResponse({ ok: true, items: deduped.slice(0, 200) });
+        emitProcessLog('extraction_completed', {
+          galleryItems: items.length,
+          directItems: directItems.length,
+          mergedItems: merged.length,
+          dedupedItems: deduped.length,
+          outputItems: Math.min(deduped.length, maxItems)
+        });
+        sendResponse({ ok: true, items: deduped.slice(0, maxItems) });
       } catch (error) {
+        emitProcessLog('extraction_failed', { error: String(error) }, 'error');
         sendResponse({ ok: false, error: String(error) });
+      } finally {
+        activeExtractionConfig = previousConfig;
+        activeExtractionSessionId = null;
+        activeExtractionStartedAt = 0;
       }
     })();
 
