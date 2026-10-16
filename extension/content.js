@@ -98,6 +98,59 @@ const extractCoordinatesFromUrl = (url = '') => {
   };
 };
 
+const isFullContributionDetailUrl = (url = '') => {
+  const normalized = String(url || '');
+  if (!normalized) {
+    return false;
+  }
+
+  const hasContribPath = /\/maps\/contrib\/.*\/photos\//i.test(normalized);
+  const hasCameraBlock = /@-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?,\d+(?:\.\d+)?a,\d+(?:\.\d+)?y,\d+(?:\.\d+)?h,\d+(?:\.\d+)?t,-?\d+(?:\.\d+)?r\//i.test(normalized);
+  const hasPhotoDataShape = /\/data=!3m7!1e1!3m5!/i.test(normalized) && /!2e10!6shttps:/i.test(normalized);
+
+  return hasContribPath && hasCameraBlock && hasPhotoDataShape;
+};
+
+const scoreContributionUrl = (url = '') => {
+  const normalized = String(url || '').trim();
+  if (!normalized) {
+    return -1;
+  }
+
+  let score = 0;
+  if (/\/maps\/contrib\/.*\/photos\//i.test(normalized)) score += 3;
+  if (/@-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?/i.test(normalized)) score += 2;
+  if (/,\d+(?:\.\d+)?y,\d+(?:\.\d+)?h,\d+(?:\.\d+)?t,-?\d+(?:\.\d+)?r\//i.test(normalized)) score += 4;
+  if (/\/data=!3m7!1e1!3m5!/i.test(normalized)) score += 4;
+  if (/!2e10!6shttps:/i.test(normalized)) score += 2;
+
+  // Penalize the short/alternate shape that loses expected perspective fields.
+  if (/,15y\/data=!3m8/i.test(normalized)) score -= 3;
+  if (/!3e12!/i.test(normalized)) score -= 2;
+
+  return score;
+};
+
+const pickBestContributionUrl = (candidates = []) => {
+  let best = '';
+  let bestScore = -1;
+
+  for (const value of candidates) {
+    const normalized = String(value || '').trim();
+    if (!normalized) {
+      continue;
+    }
+
+    const score = scoreContributionUrl(normalized);
+    if (score > bestScore) {
+      best = normalized;
+      bestScore = score;
+    }
+  }
+
+  return best;
+};
+
 const resolveContributionUrl = (node, directHref = '') => {
   const closestLink = node && typeof node.closest === 'function' ? node.closest('a[href]') : null;
   const href = closestLink ? closestLink.href : directHref;
@@ -362,6 +415,20 @@ const waitForUrlStable = async (timeoutMs = 5000, stableMs = 1000) => {
   return window.location.href;
 };
 
+const waitForFullContributionUrl = async (previousUrl, timeoutMs = 12000) => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const current = window.location.href;
+    if (current !== previousUrl && isFullContributionDetailUrl(current)) {
+      return current;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return '';
+};
+
 // Captures thumbnail srcs from <img decoding="async"> with centering inline styles.
 // These are the profile-page thumbnail images — all loaded in the SPA DOM before any click.
 const captureViewerThumbnailSrcs = () =>
@@ -402,6 +469,27 @@ const collectCurrentDetailItem = (currentUrl = window.location.href, preImageUrl
     coordinates,
     capturedAt: new Date().toISOString()
   };
+};
+
+const getNodeContributionUrlCandidates = (node) => {
+  if (!node || !(node instanceof Element)) {
+    return [];
+  }
+
+  const candidates = [];
+  const ownHref = node.getAttribute('href') || '';
+  const ownDataHref = node.getAttribute('data-href') || '';
+  const closestLinkHref = node.closest('a[href]') ? node.closest('a[href]').getAttribute('href') || '' : '';
+  const childLinkHref = node.querySelector('a[href]') ? node.querySelector('a[href]').getAttribute('href') || '' : '';
+
+  for (const raw of [ownHref, ownDataHref, closestLinkHref, childLinkHref]) {
+    const normalized = normalizeUrl(raw);
+    if (normalized) {
+      candidates.push(normalized);
+    }
+  }
+
+  return candidates;
 };
 
 const findNextPhotoButton = () => {
@@ -470,8 +558,11 @@ const nextPhotoInGallery = async (maxItems = Number.MAX_SAFE_INTEGER) => {
     clickableTarget.click();
 
     const afterUrl = await waitForUrlChange(previousUrl, 12000);
+    const fullUrl = await waitForFullContributionUrl(previousUrl, 12000);
     const finalUrl = await waitForUrlStable(5000, 1000);
-    const detailItem = collectCurrentDetailItem(finalUrl, preImageUrl);
+    const buttonCandidates = getNodeContributionUrlCandidates(clickableTarget);
+    const bestUrl = pickBestContributionUrl([fullUrl, finalUrl, afterUrl, ...buttonCandidates, previousUrl]) || finalUrl;
+    const detailItem = collectCurrentDetailItem(bestUrl, preImageUrl);
 
     if (detailItem) {
       const key = `${detailItem.url.toLowerCase()}`;
