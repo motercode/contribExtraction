@@ -27,6 +27,41 @@ const cleanImageUrl = (value = '') => {
   return match ? match[0].replace(/&amp;/g, '&') : '';
 };
 
+const toCanonicalMapsUrl = (value = '') => {
+  let url = String(value || '').trim();
+  if (!url) {
+    return '';
+  }
+
+  url = url.replace(
+    /https:\/\/www\.google\.com\/maps\/contrib\/\d+\/photos\//i,
+    'https://www.google.com/maps/'
+  );
+
+  // Removes explicit roll from @... segment in the path (for a cleaner canonical viewer URL)
+  url = url.replace(/,(-?\d+(?:\.\d+)?)r\//i, '/');
+
+  const queryIndex = url.indexOf('?');
+  const base = queryIndex >= 0 ? url.slice(0, queryIndex) : url;
+  const query = queryIndex >= 0 ? url.slice(queryIndex) : '';
+  const dataMatch = base.match(/^(.*\/data=)(.*)$/i);
+  if (!dataMatch) {
+    return url;
+  }
+
+  const dataPrefix = dataMatch[1];
+  let dataPayload = dataMatch[2];
+
+  // Removes contrib-specific tail and normalizes data header to the maps-viewer variant.
+  dataPayload = dataPayload.replace(/!4m3!8m2!3m1!1e1$/i, '');
+  dataPayload = dataPayload.replace(/^!3m7!1e1!3m5!/i, '!3m8!1e1!3m6!');
+  if (!/!3e\d+!/i.test(dataPayload)) {
+    dataPayload = dataPayload.replace(/(!2e10)(!)/i, '$1!3e11$2');
+  }
+
+  return `${dataPrefix}${dataPayload}${query}`;
+};
+
 const extractCoordinates = (url = '') => {
   const match = String(url).match(/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/i);
   if (!match) {
@@ -116,19 +151,6 @@ const waitForMapsProfile = async (page, timeoutMs = 60000) => {
       if (/Google Maps/i.test(title)) {
         return url;
       }
-    }
-    await page.waitForTimeout(250);
-  }
-
-  return page.url();
-};
-
-const waitForUrlChange = async (page, previousUrl, timeoutMs = 15000) => {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const currentUrl = page.url();
-    if (currentUrl !== previousUrl) {
-      return currentUrl;
     }
     await page.waitForTimeout(250);
   }
@@ -422,16 +444,17 @@ async function main() {
       }, cursor);
 
       await page.waitForTimeout(800);
-      const currentUrl = await waitForUrlChange(page, previousUrl, 12000);
-      const coordinates = extractCoordinates(currentUrl);
-
-      if (!coordinates) {
-        console.log(`[${cursor}] sin coordenadas — saltado`);
-        continue;
-      }
+      await waitForPhotoDetailUrl(page, previousUrl, 12000);
 
       await page.waitForTimeout(800);
-      const finalUrl = await waitForUrlStable(page, 5000, 1000);
+      await waitForUrlStable(page, 5000, 1000);
+      const finalUrl = await page.evaluate(() => window.location.href);
+      const coordinates = extractCoordinates(finalUrl);
+
+      if (!coordinates || !/\/data=/i.test(finalUrl)) {
+        console.log(`[${cursor}] URL final no válida (${finalUrl}) — saltado`);
+        continue;
+      }
       const imageUrl = allThumbnailSrcs[cursor]
         ? cleanImageUrl(allThumbnailSrcs[cursor])
         : await getBestImage(page, allThumbnailSrcs);
@@ -441,6 +464,7 @@ async function main() {
         items.push({
           index: items.length + 1,
           url: finalUrl,
+          mapsUrlCanonical: toCanonicalMapsUrl(finalUrl),
           imageUrl,
           coordinates,
           capturedAt: new Date().toISOString(),

@@ -42,7 +42,7 @@ http://localhost:3000
 3. Abre la extensión y pulsa "Extraer desde pestaña actual".
 4. La extensión recorre la página con scroll y extrae fotos, textos y enlaces.
 5. El backend guarda el JSON en `contribuciones.json`.
-   - El formato es el mismo que el test: `{ "total": number, "items": [...] }` con `index`, `url`, `imageUrl`, `coordinates` y `capturedAt`.
+   - El formato es el mismo que el test: `{ "total": number, "items": [...] }` con `index`, `url`, `mapsUrlCanonical`, `imageUrl`, `coordinates` y `capturedAt`.
 
 ## Verificación Playwright de 10 fotos
 
@@ -53,6 +53,22 @@ npm run test:maps-11
 ```
 
 Esto genera el archivo `contribuciones_test.json` con los 10 resultados esperados y sirve como referencia para el algoritmo manual y la extensión.
+
+En ese JSON, la propiedad `url` de cada item se guarda con la URL final estable de navegación en la galería (la ruta completa de detalle con `/data=`), no con la URL intermedia del perfil.
+
+Además, cada item incluye `mapsUrlCanonical`, una versión normalizada de `url` orientada al visor general de Maps (`https://www.google.com/maps/@...`), para facilitar enlaces consistentes fuera de la ruta de contribuciones.
+
+Reglas de normalización de `mapsUrlCanonical`:
+
+1. `https://www.google.com/maps/contrib/<userId>/photos/` se sustituye por `https://www.google.com/maps/`.
+2. Se elimina el componente de roll `,xxxr` del bloque `@...` de la ruta.
+3. En el bloque `data`, se normaliza el encabezado `!3m7!1e1!3m5!` a `!3m8!1e1!3m6!`.
+4. Se elimina la cola específica de contribuciones `!4m3!8m2!3m1!1e1` cuando aparece.
+5. Si no existe un marcador `!3e...!`, se inserta `!3e11` tras `!2e10`.
+
+Notas:
+- `url` (raw) y `mapsUrlCanonical` pueden abrir la misma foto, pero no son intercambiables a nivel de formato.
+- La URL canónica no intenta cambiar de foto: conserva el `photoId` (`!1s...`) y la imagen embebida (`!6s...`) de la URL original.
 
 ## Regla importante sobre la galería
 
