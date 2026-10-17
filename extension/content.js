@@ -180,6 +180,10 @@ const cleanImageUrl = (value) => {
   return match ? match[0].replace(/&amp;/g, '&') : '';
 };
 
+// Misma lógica que lib/maps-url.js (el content script no puede importar módulos).
+// El bloque data= es un protobuf serializado: "!3m10" significa "los 10 campos siguientes son
+// míos". Al insertar "!3e11" en el bloque de la foto hay que sumar 1 a los dos contadores que
+// lo contienen; si no, Maps no entiende la URL y no abre la foto.
 const toCanonicalMapsUrl = (value = '') => {
   let url = String(value || '').trim();
   if (!url) {
@@ -200,16 +204,38 @@ const toCanonicalMapsUrl = (value = '') => {
     return url;
   }
 
-  const dataPrefix = dataMatch[1];
-  let dataPayload = dataMatch[2];
+  // Cola propia de la galería del perfil (1e1 o 1e2 según la sesión): no pertenece a la foto.
+  let dataPayload = dataMatch[2].replace(/!4m3!8m2!3m1!1e\d$/i, '');
 
-  dataPayload = dataPayload.replace(/!4m3!8m2!3m1!1e1$/i, '');
-  dataPayload = dataPayload.replace(/^!3m7!1e1!3m5!/i, '!3m8!1e1!3m6!');
-  if (!/!3e\d+!/i.test(dataPayload)) {
-    dataPayload = dataPayload.replace(/(!2e10)(!)/i, '$1!3e11$2');
+  const photoBlock = dataPayload.match(/^!3m(\d+)!1e(\d+)!3m(\d+)!/i);
+  if (photoBlock) {
+    const [whole, outerRaw, kind, innerRaw] = photoBlock;
+    let outer = Number(outerRaw);
+    let inner = Number(innerRaw);
+    let rest = dataPayload.slice(whole.length);
+
+    // "!9m2!1b1!2i46" abre la foto con el mapa expandido; sin él sale con el mapa colapsado.
+    // Se quita el bloque con sus campos y se descuentan de los dos contadores que lo contienen.
+    const expandedMap = rest.match(/!9m(\d+)((?:![^!]+)*)/i);
+    if (expandedMap) {
+      const fieldCount = Number(expandedMap[1]);
+      const fields = expandedMap[2].split('!').slice(1, fieldCount + 1);
+      const removed = `!9m${fieldCount}${fields.map((field) => `!${field}`).join('')}`;
+      rest = rest.replace(removed, '');
+      outer -= fieldCount + 1;
+      inner -= fieldCount + 1;
+    }
+
+    if (!/!3e\d+!/i.test(rest) && /!2e10!/i.test(`!${rest}`)) {
+      rest = `!${rest}`.replace(/(!2e10)(!|$)/i, '$1!3e11$2').slice(1);
+      outer += 1;
+      inner += 1;
+    }
+
+    dataPayload = `!3m${outer}!1e${kind}!3m${inner}!${rest}`;
   }
 
-  return `${dataPrefix}${dataPayload}${query}`;
+  return `${dataMatch[1]}${dataPayload}${query}`;
 };
 
 const extractCoordinatesFromUrl = (url = '') => {
@@ -955,6 +981,693 @@ const scrollPageForResults = async () => {
     finalScrollHeight: target.scrollHeight || 0
   };
 };
+
+// ---------------------------------------------------------------------------
+// Fase 1: inventario completo del perfil.
+// Baja por la galería sin abrir fotos y envía lo encontrado al backend por
+// paquetes (que lo acumula), de modo que nunca se pierde lo ya recogido.
+// Se ejecuta en la pestaña: no depende de que el popup siga abierto.
+// ---------------------------------------------------------------------------
+const NETWORK_TAP_SOURCE = 'contrib-extraction-network-tap';
+const HARVEST_SCROLL_DELAY_MS = 1500;
+const HARVEST_NO_PROGRESS_LIMIT = 20;
+const HARVEST_FLUSH_SIZE = 50;
+const HARVEST_MAX_NETWORK_SAMPLES = 150;
+const HARVEST_STATUS_KEY = 'harvestStatus';
+
+let harvestState = null;
+
+const sendToBackground = (message) =>
+  new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve(response || { ok: false, error: 'Sin respuesta del background.' });
+      });
+    } catch (error) {
+      resolve({ ok: false, error: String(error) });
+    }
+  });
+
+// Lee el total de la caja del perfil: <span aria-label="16.598 fotos" ...>
+const readProfilePhotoTotal = () => {
+  const node = Array.from(document.querySelectorAll('[aria-label]')).find((element) =>
+    /^[\d.,\s]+(?:fotos|photos)$/i.test(safeText(element.getAttribute('aria-label')))
+  );
+  if (!node) {
+    return null;
+  }
+
+  const digits = node.getAttribute('aria-label').replace(/\D/g, '');
+  return digits ? Number(digits) : null;
+};
+
+const getContribUserId = () => window.location.href.match(/\/maps\/contrib\/(\d+)/)?.[1] || null;
+
+// La parte de la URL de imagen anterior a "=" identifica la foto (lo posterior es el tamaño/encuadre).
+const imageKey = (url = '') => String(url).split('=')[0];
+
+const findTileImage = (button) => {
+  const candidates = [
+    button.tagName === 'IMG' ? button : null,
+    button.querySelector('img'),
+    button.parentElement?.querySelector('img')
+  ];
+
+  for (const img of candidates) {
+    const src = img ? cleanImageUrl(img.currentSrc || img.src || '') : '';
+    if (src && /googleusercontent\.com/i.test(src) && !isLikelyAvatarImage(src)) {
+      return src;
+    }
+  }
+
+  return '';
+};
+
+const harvestVisibleTiles = () => {
+  const found = [];
+
+  for (const button of findGalleryPhotoButtons()) {
+    const label = safeText(button.getAttribute('aria-label') || '');
+    const positionMatch = label.match(/(\d[\d.,]*)\s+(?:de|of)\s+\d/i);
+    const position = positionMatch ? Number(positionMatch[1].replace(/\D/g, '')) : null;
+    const bucketNode = button.closest('[data-photo-bucket-iden]');
+    const bucketId = bucketNode ? bucketNode.getAttribute('data-photo-bucket-iden') : null;
+    const imageUrl = findTileImage(button);
+    const url = getNodeContributionUrlCandidates(button).find((candidate) => /\/maps\//i.test(candidate)) || null;
+    const key = bucketId || (imageUrl ? imageKey(imageUrl) : null);
+
+    if (!key) {
+      // Miniatura aún sin cargar: se recogerá en una pasada posterior.
+      continue;
+    }
+
+    found.push({
+      key,
+      position,
+      bucketId,
+      imageUrl: imageUrl || null,
+      url,
+      coordinates: url ? extractCoordinatesFromUrl(url) : null,
+      capturedAt: new Date().toISOString()
+    });
+  }
+
+  return found;
+};
+
+const publishHarvestStatus = (patch = {}) => {
+  if (!harvestState) {
+    return;
+  }
+
+  Object.assign(harvestState.status, patch, { updatedAt: new Date().toISOString() });
+  try {
+    chrome.storage.local.set({ [HARVEST_STATUS_KEY]: { ...harvestState.status } });
+  } catch {
+    // El estado es informativo; no debe parar la recogida.
+  }
+};
+
+const flushHarvest = async (force = false) => {
+  const state = harvestState;
+  if (!state || state.pending.length === 0 || (!force && state.pending.length < HARVEST_FLUSH_SIZE)) {
+    return;
+  }
+
+  const batch = state.pending.splice(0, state.pending.length);
+  const response = await sendToBackground({
+    type: 'HARVEST_SAVE',
+    payload: { userId: state.userId, profileTotal: state.profileTotal, items: batch }
+  });
+
+  if (!response.ok) {
+    // Se reintenta en el siguiente envío: no se pierde nada.
+    state.pending.unshift(...batch);
+    publishHarvestStatus({ lastError: response.error || 'No se pudo guardar en el backend.' });
+    return;
+  }
+
+  publishHarvestStatus({ stored: response.result?.total ?? state.status.stored, lastError: null });
+};
+
+const onNetworkTapMessage = (event) => {
+  const state = harvestState;
+  if (!state || event.source !== window || event.data?.source !== NETWORK_TAP_SOURCE) {
+    return;
+  }
+  if (state.networkSamples >= HARVEST_MAX_NETWORK_SAMPLES) {
+    return;
+  }
+
+  state.networkSamples += 1;
+  void sendToBackground({
+    type: 'HARVEST_NETWORK_SAMPLE',
+    payload: {
+      userId: state.userId,
+      sessionId: state.sessionId,
+      url: event.data.url,
+      bodyLength: event.data.bodyLength,
+      body: event.data.body,
+      capturedAt: new Date().toISOString()
+    }
+  });
+};
+
+window.addEventListener('message', onNetworkTapMessage);
+
+const runHarvest = async (sessionId) => {
+  const userId = getContribUserId();
+  const profileTotal = readProfilePhotoTotal();
+
+  harvestState = {
+    sessionId,
+    userId,
+    profileTotal,
+    seen: new Set(),
+    pending: [],
+    networkSamples: 0,
+    stopRequested: false,
+    status: { running: true, userId, profileTotal, seen: 0, stored: 0, steps: 0, startedAt: new Date().toISOString(), lastError: null }
+  };
+  publishHarvestStatus();
+  emitProcessLog('harvest_started', { userId, profileTotal });
+
+  let target = findScrollableElement();
+  let noProgress = 0;
+  let loggedTileSample = false;
+  let finishReason = 'stopped';
+
+  try {
+    for (let step = 0; ; step += 1) {
+      if (harvestState.stopRequested) {
+        finishReason = 'stopped_by_user';
+        break;
+      }
+
+      const tiles = harvestVisibleTiles();
+      let newCount = 0;
+      for (const tile of tiles) {
+        if (!harvestState.seen.has(tile.key)) {
+          harvestState.seen.add(tile.key);
+          harvestState.pending.push(tile);
+          newCount += 1;
+        }
+      }
+
+      if (!loggedTileSample && tiles.length > 0) {
+        // Diagnóstico único: estructura real de una miniatura de la galería.
+        loggedTileSample = true;
+        const sampleNode = findGalleryPhotoButtons()[0];
+        emitProcessLog('harvest_tile_sample', {
+          tile: tiles[0],
+          outerHTML: sampleNode ? sampleNode.outerHTML.slice(0, 3000) : null
+        });
+      }
+
+      await flushHarvest();
+      publishHarvestStatus({ seen: harvestState.seen.size, steps: step + 1 });
+
+      if (profileTotal && harvestState.seen.size >= profileTotal) {
+        finishReason = 'profile_total_reached';
+        break;
+      }
+
+      if (step % 25 === 0) {
+        target = findScrollableElement();
+      }
+
+      const before = target.scrollTop || 0;
+      target.scrollTop = before + Math.max(400, Math.floor((target.clientHeight || 800) * 0.9));
+      await new Promise((resolve) => setTimeout(resolve, HARVEST_SCROLL_DELAY_MS));
+      const moved = Math.abs((target.scrollTop || 0) - before) > 2;
+
+      if (newCount === 0 && !moved) {
+        noProgress += 1;
+        // Pequeño rebote para que Maps dispare la carga del siguiente bloque.
+        target.scrollTop = Math.max(0, (target.scrollTop || 0) - 600);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        target.scrollTop = target.scrollHeight;
+        await new Promise((resolve) => setTimeout(resolve, HARVEST_SCROLL_DELAY_MS));
+      } else {
+        noProgress = 0;
+      }
+
+      if (noProgress >= HARVEST_NO_PROGRESS_LIMIT) {
+        finishReason = 'no_more_items';
+        break;
+      }
+    }
+  } catch (error) {
+    finishReason = 'error';
+    publishHarvestStatus({ lastError: String(error) });
+    emitProcessLog('harvest_failed', { error: String(error) }, 'error');
+  }
+
+  await flushHarvest(true);
+  publishHarvestStatus({ running: false, finishReason, seen: harvestState.seen.size });
+  emitProcessLog('harvest_finished', {
+    finishReason,
+    seen: harvestState.seen.size,
+    profileTotal,
+    pendingNotSaved: harvestState.pending.length
+  });
+};
+
+// ---------------------------------------------------------------------------
+// Fase 2: coordenadas reales de cada foto.
+// Mismo mecanismo que "Extraer desde esta pestaña" (click en la miniatura y
+// esperas de URL), pero sin tope de elementos, guardando cada pocos items en
+// harvest/<userId>.json y saltándose al retomar lo que ya tiene coordenadas.
+// ---------------------------------------------------------------------------
+const DETAIL_FLUSH_SIZE = 20;
+const DETAIL_STATUS_KEY = 'detailStatus';
+const DETAIL_MAX_TRIES_PER_PHOTO = 2;
+const DETAIL_MAX_CONSECUTIVE_FAILURES = 10;
+const DETAIL_LOAD_MORE_LIMIT = 15;
+const DETAIL_LOAD_MORE_WAIT_MS = 4000;
+const DETAIL_TILE_IMAGE_TIMEOUT_MS = 3000;
+
+let detailState = null;
+
+// Solo miniaturas de la galería del perfil: <button data-photo-id="10:..." aria-label="Foto 1 de 1">.
+// Los números pueden llevar separador de miles ("Foto 1 de 1.234") y, si la sesión es la del
+// dueño del perfil, la etiqueta sigue con las visualizaciones ("Foto 1 de 1·22 visualizaciones").
+// El botón hermano "Acciones de la foto" tiene el mismo data-photo-id y queda fuera.
+const DETAIL_TILE_LABEL = /^(foto|photo|image)\s+[\d.,]+\s+(de|of)\s+[\d.,]+(?![\d.,])/i;
+const findDetailTiles = () =>
+  Array.from(document.querySelectorAll('button[data-photo-id]')).filter((button) =>
+    DETAIL_TILE_LABEL.test(safeText(button.getAttribute('aria-label') || ''))
+  );
+
+// Fotos que Google ha retirado: la etiqueta termina en ", No se ha publicado" y la miniatura lleva
+// un icono de estado (div[role=button][data-tooltip]) con el mismo texto. Al abrirlas el visor no
+// cambia de foto, así que solo sumaban fallos hasta cortar por too_many_failures.
+const DETAIL_UNPUBLISHED_LABEL = /no se ha publicado|no publicad|not published|unpublished|non pubblicat|non publi|nicht ver(ö|o)ffentlicht/i;
+const isUnpublishedTile = (button) => {
+  const labels = [
+    button.getAttribute('aria-label') || '',
+    ...Array.from(button.querySelectorAll('[data-tooltip], [aria-label]')).map(
+      (node) => `${node.getAttribute('data-tooltip') || ''} ${node.getAttribute('aria-label') || ''}`
+    )
+  ];
+  return labels.some((label) => DETAIL_UNPUBLISHED_LABEL.test(label));
+};
+
+// Diagnóstico para cuando no se encuentran miniaturas: qué hay realmente en la página.
+const describeGalleryDom = () => {
+  const withPhotoId = Array.from(document.querySelectorAll('[data-photo-id]'));
+  const counterLabels = Array.from(document.querySelectorAll('[aria-label]')).filter((node) =>
+    /(foto|photo)\s+[\d.,]+\s+(de|of)\s+[\d.,]+/i.test(node.getAttribute('aria-label') || '')
+  );
+  const firstTileLike = withPhotoId[0] || counterLabels[0] || document.querySelector('img[src*="googleusercontent.com"]')?.closest('button, a, [role="button"]');
+
+  return {
+    url: window.location.href,
+    buttonsWithPhotoId: document.querySelectorAll('button[data-photo-id]').length,
+    anyWithPhotoId: withPhotoId.length,
+    photoIdTags: [...new Set(withPhotoId.slice(0, 50).map((node) => node.tagName))],
+    counterLabels: counterLabels.length,
+    sampleLabels: [...withPhotoId, ...counterLabels].slice(0, 5).map((node) => node.getAttribute('aria-label')),
+    googleImages: document.querySelectorAll('img[src*="googleusercontent.com"]').length,
+    tabs: Array.from(document.querySelectorAll('[role="tab"]')).map((tab) => `${safeText(tab.textContent)}${tab.getAttribute('aria-selected') === 'true' ? ' (activa)' : ''}`),
+    sampleHtml: firstTileLike ? firstTileLike.outerHTML.slice(0, 2500) : null
+  };
+};
+
+// El id de la miniatura ("10:CIHM...") aparece en la URL de detalle como "!1sCIHM...".
+const photoIdInUrl = (photoId, url) => {
+  const bare = String(photoId || '').replace(/^\d+:/, '');
+  return Boolean(bare) && String(url).includes(`!1s${bare}`);
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const waitForTileImage = async (button) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < DETAIL_TILE_IMAGE_TIMEOUT_MS) {
+    const src = findTileImage(button);
+    if (src) {
+      return src;
+    }
+    await sleep(200);
+  }
+  return '';
+};
+
+const publishDetailStatus = (patch = {}) => {
+  if (!detailState) {
+    return;
+  }
+
+  Object.assign(detailState.status, patch, { updatedAt: new Date().toISOString() });
+  try {
+    chrome.storage.local.set({ [DETAIL_STATUS_KEY]: { ...detailState.status } });
+  } catch {
+    // El estado es informativo; no debe parar la extracción.
+  }
+};
+
+const flushDetails = async (force = false) => {
+  const state = detailState;
+  if (!state || state.pending.length === 0 || (!force && state.pending.length < DETAIL_FLUSH_SIZE)) {
+    return;
+  }
+
+  const batch = state.pending.splice(0, state.pending.length);
+  const response = await sendToBackground({
+    type: 'DETAIL_SAVE',
+    payload: { userId: state.userId, profileTotal: state.profileTotal, items: batch }
+  });
+
+  if (!response.ok) {
+    // Se reintenta en el siguiente envío: no se pierde nada.
+    state.pending.unshift(...batch);
+    publishDetailStatus({ lastError: response.error || 'No se pudo guardar en el backend.' });
+    emitProcessLog('detail_flush_failed', { error: response.error || null, pending: state.pending.length }, 'error');
+    return;
+  }
+
+  publishDetailStatus({ stored: response.result?.withDetail ?? state.status.stored, lastError: null });
+};
+
+// Baja la galería hasta que aparezcan miniaturas nuevas. Devuelve false si no sale nada más.
+const loadMoreDetailTiles = async (target, currentCount) => {
+  for (let attempt = 0; attempt < DETAIL_LOAD_MORE_LIMIT; attempt += 1) {
+    if (attempt > 0) {
+      // Pequeño rebote para que Maps dispare la carga del siguiente bloque.
+      target.scrollTop = Math.max(0, (target.scrollTop || 0) - 600);
+      await sleep(400);
+    }
+    target.scrollTop = target.scrollHeight;
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < DETAIL_LOAD_MORE_WAIT_MS) {
+      await sleep(300);
+      if (findDetailTiles().length > currentCount) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
+
+// URL de detalle de ESTA foto (el id de la miniatura va en la URL) y con coordenadas.
+// No se exige el bloque de cámara completo: hay fotos cuya URL final es la forma corta
+// "@lat,lng,3a,75y,90t" (sin rumbo ni giro) y son igual de válidas.
+const isDetailUrlOfPhoto = (url, photoId) =>
+  /\/maps\/contrib\/.*\/photos\/@-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?,/i.test(url) && photoIdInUrl(photoId, url);
+
+// Abre una miniatura con el mismo click y esperas que nextPhotoInGallery, pero solo
+// acepta la URL si es la de la foto pulsada: nunca asigna coordenadas de otra foto.
+const openTileAndReadDetail = async (button, photoId, config) => {
+  const previousUrl = window.location.href;
+
+  button.scrollIntoView({ block: 'center', inline: 'center' });
+  button.click();
+
+  const changedUrl = await waitForUrlChange(previousUrl, config.urlChangeTimeoutMs);
+  if (changedUrl === previousUrl && !isDetailUrlOfPhoto(changedUrl, photoId)) {
+    // El click no abrió nada: no tiene sentido esperar además a la URL de detalle.
+    return { ok: false, reason: 'url_not_changed', finalUrl: changedUrl };
+  }
+
+  const startedAt = Date.now();
+  let matchedUrl = '';
+  while (Date.now() - startedAt < config.urlChangeTimeoutMs) {
+    if (isDetailUrlOfPhoto(window.location.href, photoId)) {
+      matchedUrl = window.location.href;
+      break;
+    }
+    await sleep(config.urlChangePollDelayMs);
+  }
+
+  if (!matchedUrl) {
+    const finalUrl = window.location.href;
+    return { ok: false, reason: finalUrl === previousUrl ? 'url_not_changed' : 'detail_url_not_for_this_photo', finalUrl };
+  }
+
+  // Maps reescribe la URL un par de veces (cámara/encuadre); se espera a que se asiente.
+  await waitForUrlStable(config.urlStableTimeoutMs, config.urlStableWindowMs);
+  const finalUrl = window.location.href;
+  const url = isDetailUrlOfPhoto(finalUrl, photoId) ? finalUrl : matchedUrl;
+
+  const coordinates = extractCoordinatesFromUrl(url);
+  if (!coordinates) {
+    return { ok: false, reason: 'no_coordinates', finalUrl: url };
+  }
+
+  return { ok: true, url, coordinates };
+};
+
+const runDetails = async (sessionId, config) => {
+  const userId = getContribUserId();
+  const profileTotal = readProfilePhotoTotal();
+
+  detailState = {
+    sessionId,
+    userId,
+    profileTotal,
+    donePhotoIds: new Set(),
+    doneKeys: new Set(),
+    processed: new Set(),
+    pending: [],
+    stopRequested: false,
+    status: {
+      running: true,
+      userId,
+      profileTotal,
+      alreadyDone: 0,
+      captured: 0,
+      skipped: 0,
+      unpublished: 0,
+      withDate: 0,
+      failed: 0,
+      stored: 0,
+      startedAt: new Date().toISOString(),
+      lastError: null
+    }
+  };
+
+  let finishReason = 'stopped';
+
+  try {
+    const doneResponse = await sendToBackground({ type: 'DETAIL_DONE', userId });
+    if (!doneResponse.ok) {
+      throw new Error(doneResponse.error || 'No se pudo leer el progreso guardado.');
+    }
+    for (const id of doneResponse.result.photoIds || []) detailState.donePhotoIds.add(id);
+    for (const key of doneResponse.result.keys || []) detailState.doneKeys.add(key);
+    publishDetailStatus({ alreadyDone: detailState.doneKeys.size, stored: detailState.doneKeys.size });
+    emitProcessLog('detail_started', { userId, profileTotal, alreadyDone: detailState.doneKeys.size, config, url: window.location.href });
+
+    if (findDetailTiles().length === 0) {
+      const dom = describeGalleryDom();
+      emitProcessLog('detail_no_tiles', dom, 'error');
+      throw new Error(`No hay miniaturas de fotos en la página. ¿Está abierta la pestaña "Fotos" del perfil? (${dom.anyWithPhotoId} elementos con data-photo-id)`);
+    }
+
+    // Se fija antes de abrir ninguna foto, mientras la galería es lo que hace scroll.
+    const target = findScrollableElement();
+    const tries = new Map();
+    let cursor = 0;
+    let consecutiveFailures = 0;
+
+    while (true) {
+      if (detailState.stopRequested) {
+        finishReason = 'stopped_by_user';
+        break;
+      }
+
+      const tiles = findDetailTiles();
+      if (cursor > tiles.length) {
+        cursor = 0;
+      }
+
+      // Siguiente miniatura sin procesar; las ya resueltas se saltan sin abrirlas.
+      let button = null;
+      let photoId = null;
+      for (; cursor < tiles.length; cursor += 1) {
+        const candidateId = tiles[cursor].getAttribute('data-photo-id');
+        if (detailState.processed.has(candidateId)) {
+          continue;
+        }
+        if (detailState.donePhotoIds.has(candidateId)) {
+          detailState.processed.add(candidateId);
+          detailState.status.skipped += 1;
+          continue;
+        }
+        if (isUnpublishedTile(tiles[cursor])) {
+          detailState.processed.add(candidateId);
+          detailState.status.unpublished += 1;
+          emitProcessLog('detail_unpublished_skipped', { photoId: candidateId, cursor, label: tiles[cursor].getAttribute('aria-label') });
+          continue;
+        }
+        button = tiles[cursor];
+        photoId = candidateId;
+        break;
+      }
+
+      if (!button) {
+        publishDetailStatus({ tilesLoaded: tiles.length });
+        if (profileTotal && tiles.length >= profileTotal) {
+          finishReason = 'profile_total_reached';
+          break;
+        }
+        const grew = await loadMoreDetailTiles(target, tiles.length);
+        if (!grew) {
+          emitProcessLog('detail_no_more_tiles', { cursor, ...describeGalleryDom(), sampleHtml: undefined }, 'warn');
+          finishReason = 'no_more_items';
+          break;
+        }
+        continue;
+      }
+
+      button.scrollIntoView({ block: 'center', inline: 'center' });
+      const tileImageUrl = await waitForTileImage(button);
+      const key = tileImageUrl ? imageKey(tileImageUrl) : null;
+
+      if (key && detailState.doneKeys.has(key)) {
+        detailState.processed.add(photoId);
+        detailState.status.skipped += 1;
+        continue;
+      }
+
+      const stepStartedAt = Date.now();
+      const result = await openTileAndReadDetail(button, photoId, config);
+      const attempt = (tries.get(photoId) || 0) + 1;
+
+      if (result.ok && key) {
+        // Fecha de captura del EXIF del original. Si falla, la foto se guarda igual sin ella:
+        // "npm run export -- --dates" la completa después.
+        const takenAtResponse = await sendToBackground({ type: 'TAKEN_AT', key });
+        const takenAt = takenAtResponse.ok ? takenAtResponse.takenAt || null : null;
+        if (takenAt) {
+          detailState.status.withDate += 1;
+        } else if (!takenAtResponse.ok) {
+          emitProcessLog('detail_taken_at_failed', { photoId, error: takenAtResponse.error || null }, 'warn');
+        }
+
+        detailState.processed.add(photoId);
+        detailState.doneKeys.add(key);
+        detailState.donePhotoIds.add(photoId);
+        detailState.pending.push({
+          key,
+          photoId,
+          imageUrl: tileImageUrl,
+          url: result.url,
+          mapsUrlCanonical: toCanonicalMapsUrl(result.url),
+          coordinates: result.coordinates,
+          ...(takenAt ? { takenAt, takenAtSource: 'exif' } : {}),
+          detailCapturedAt: new Date().toISOString()
+        });
+        detailState.status.captured += 1;
+        consecutiveFailures = 0;
+
+        if (detailState.status.captured % 25 === 0) {
+          emitProcessLog('detail_progress', { ...detailState.status, cursor, tilesLoaded: tiles.length });
+        }
+      } else {
+        const reason = result.ok ? 'tile_image_missing' : result.reason;
+        consecutiveFailures += 1;
+        tries.set(photoId, attempt);
+        emitProcessLog('detail_step_failed', {
+          photoId,
+          cursor,
+          attempt,
+          reason,
+          finalUrl: result.finalUrl || null,
+          stepElapsedMs: Date.now() - stepStartedAt
+        }, 'warn');
+
+        if (attempt >= DETAIL_MAX_TRIES_PER_PHOTO) {
+          // Se deja sin coordenadas: la siguiente ejecución lo vuelve a intentar.
+          detailState.processed.add(photoId);
+          detailState.status.failed += 1;
+        }
+
+        if (consecutiveFailures >= DETAIL_MAX_CONSECUTIVE_FAILURES) {
+          // Algo general va mal (sesión, captcha, Maps cambió): mejor parar que seguir fallando.
+          finishReason = 'too_many_failures';
+          break;
+        }
+      }
+
+      await flushDetails();
+      publishDetailStatus({ cursor, tilesLoaded: tiles.length });
+      await sleep(config.galleryItemDelayMs);
+    }
+  } catch (error) {
+    finishReason = 'error';
+    publishDetailStatus({ lastError: String(error.message || error) });
+    emitProcessLog('detail_failed', { error: String(error) }, 'error');
+  }
+
+  await flushDetails(true);
+  publishDetailStatus({ running: false, finishReason });
+  emitProcessLog('detail_finished', {
+    finishReason,
+    ...detailState.status,
+    pendingNotSaved: detailState.pending.length
+  });
+};
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'DETAIL_START') {
+    if (detailState?.status.running || harvestState?.status.running) {
+      sendResponse({ ok: false, error: 'Ya hay un proceso en marcha en esta pestaña.' });
+      return;
+    }
+    if (!getContribUserId()) {
+      sendResponse({ ok: false, error: 'Abre la pestaña de fotos de un perfil (/maps/contrib/<id>/photos).' });
+      return;
+    }
+
+    const config = setActiveExtractionConfig(message.config || {});
+    activeExtractionSessionId = String(message.sessionId || `detail-${Date.now()}`);
+    activeExtractionStartedAt = Date.now();
+    void runDetails(activeExtractionSessionId, config);
+    sendResponse({ ok: true, userId: getContribUserId(), profileTotal: readProfilePhotoTotal() });
+    return;
+  }
+
+  if (message.type === 'DETAIL_STOP') {
+    if (detailState) {
+      detailState.stopRequested = true;
+    }
+    sendResponse({ ok: true });
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'HARVEST_START') {
+    if (harvestState?.status.running) {
+      sendResponse({ ok: false, error: 'Ya hay un inventario en marcha en esta pestaña.' });
+      return;
+    }
+    if (!getContribUserId()) {
+      sendResponse({ ok: false, error: 'Abre la pestaña de fotos de un perfil (/maps/contrib/<id>/photos).' });
+      return;
+    }
+
+    activeExtractionSessionId = String(message.sessionId || `harvest-${Date.now()}`);
+    activeExtractionStartedAt = Date.now();
+    void runHarvest(activeExtractionSessionId);
+    sendResponse({ ok: true, userId: getContribUserId(), profileTotal: readProfilePhotoTotal() });
+    return;
+  }
+
+  if (message.type === 'HARVEST_STOP') {
+    if (harvestState) {
+      harvestState.stopRequested = true;
+    }
+    sendResponse({ ok: true });
+  }
+});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!isGoogleMapsPage()) {

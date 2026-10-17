@@ -16,9 +16,19 @@
     "https://maps.google.com/*",
     "https://consent.google.com/*",
     "https://www.google.com/maps/*",
-    "https://www.google.com/maps/contrib/*"
+    "https://www.google.com/maps/contrib/*",
+    "https://lh3.googleusercontent.com/*"
   ],
   "content_scripts": [
+    {
+      "matches": [
+        "https://www.google.com/maps*",
+        "https://maps.google.com/*"
+      ],
+      "js": ["network-tap.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://www.google.com/*",

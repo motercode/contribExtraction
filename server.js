@@ -2,6 +2,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { toCanonicalMapsUrl, toStableThumbnailUrl } from './lib/maps-url.js';
+import { datesPath, readDatesCache, takenAtFields } from './lib/taken-at.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -271,7 +273,7 @@ const buildExportPayload = (items = []) => {
   };
 };
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '5mb' }));
 app.use(express.static(__dirname, { index: false }));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
@@ -294,6 +296,205 @@ app.post('/api/save', (req, res) => {
   fs.writeFileSync(OUTPUT_PATH, JSON.stringify(payload, null, 2), 'utf8');
 
   res.json({ ok: true, total: payload.total, path: OUTPUT_PATH });
+});
+
+// --- Fase 1: inventario incremental por perfil (harvest/<userId>.json) ---
+const HARVEST_DIR = path.join(__dirname, 'harvest');
+
+const harvestPath = (userId) => path.join(HARVEST_DIR, `${userId}.json`);
+
+const isValidUserId = (userId) => /^\d+$/.test(String(userId || ''));
+
+const readHarvest = (userId) => {
+  try {
+    return JSON.parse(fs.readFileSync(harvestPath(userId), 'utf8'));
+  } catch {
+    return { userId, profileTotal: null, total: 0, items: [] };
+  }
+};
+
+app.post('/api/harvest', (req, res) => {
+  const { userId, profileTotal, items } = req.body || {};
+  if (!isValidUserId(userId) || !Array.isArray(items)) {
+    return res.status(400).json({ ok: false, error: 'Se esperaba { userId, items[] }.' });
+  }
+
+  const current = readHarvest(userId);
+  const byKey = new Map(current.items.map((item) => [item.key, item]));
+  let added = 0;
+
+  for (const item of items) {
+    const key = String(item?.key || '').trim();
+    if (!key) {
+      continue;
+    }
+
+    const existing = byKey.get(key);
+    if (!existing) {
+      added += 1;
+      byKey.set(key, { ...item, key });
+      continue;
+    }
+
+    // Completa campos que antes faltaban, sin borrar los que ya había.
+    for (const [field, value] of Object.entries(item)) {
+      if (value !== null && value !== undefined && (existing[field] === null || existing[field] === undefined)) {
+        existing[field] = value;
+      }
+    }
+  }
+
+  const merged = {
+    userId,
+    profileTotal: Number(profileTotal) || current.profileTotal || null,
+    updatedAt: new Date().toISOString(),
+    total: byKey.size,
+    items: [...byKey.values()]
+  };
+
+  writeHarvest(userId, merged);
+  res.json({ ok: true, added, total: merged.total, profileTotal: merged.profileTotal });
+});
+
+app.get('/api/harvest/:userId', (req, res) => {
+  if (!isValidUserId(req.params.userId)) {
+    return res.status(400).json({ ok: false, error: 'userId no válido.' });
+  }
+
+  const current = readHarvest(req.params.userId);
+  res.json({
+    ok: true,
+    userId: current.userId,
+    profileTotal: current.profileTotal,
+    total: current.total,
+    withCoordinates: current.items.filter((item) => item.coordinates).length,
+    withUrl: current.items.filter((item) => item.url).length,
+    withDetail: current.items.filter((item) => item.detailCapturedAt).length,
+    updatedAt: current.updatedAt || null
+  });
+});
+
+// --- Fase 2: coordenadas reales de cada foto, abriéndolas una a una ---
+// Escritura atómica: si el proceso muere a mitad, el JSON anterior sigue intacto.
+const writeHarvest = (userId, data) => {
+  fs.mkdirSync(HARVEST_DIR, { recursive: true });
+  const target = harvestPath(userId);
+  const temp = `${target}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(temp, target);
+};
+
+const DETAIL_FIELDS = ['photoId', 'url', 'mapsUrlCanonical', 'coordinates', 'detailCapturedAt', 'takenAt', 'takenAtSource'];
+
+app.post('/api/harvest/details', (req, res) => {
+  const { userId, profileTotal, items } = req.body || {};
+  if (!isValidUserId(userId) || !Array.isArray(items)) {
+    return res.status(400).json({ ok: false, error: 'Se esperaba { userId, items[] }.' });
+  }
+
+  const current = readHarvest(userId);
+  const byKey = new Map(current.items.map((item) => [item.key, item]));
+  let updated = 0;
+  let added = 0;
+
+  for (const detail of items) {
+    const key = String(detail?.key || '').trim();
+    if (!key || !detail.coordinates || !detail.url) {
+      continue;
+    }
+
+    let item = byKey.get(key);
+    if (!item) {
+      // Foto que no estaba en el inventario (p. ej. subida después): se añade.
+      item = { key, position: null, bucketId: null, imageUrl: detail.imageUrl || null, capturedAt: detail.detailCapturedAt };
+      byKey.set(key, item);
+      added += 1;
+    } else {
+      updated += 1;
+    }
+
+    // Los datos de la fase 2 sustituyen a los de la fase 1 (que eran los de la página, no los de la foto).
+    for (const field of DETAIL_FIELDS) {
+      if (detail[field] !== undefined) {
+        item[field] = detail[field];
+      }
+    }
+  }
+
+  const allItems = [...byKey.values()];
+  const merged = {
+    ...current,
+    userId,
+    profileTotal: Number(profileTotal) || current.profileTotal || null,
+    updatedAt: new Date().toISOString(),
+    total: allItems.length,
+    items: allItems
+  };
+
+  writeHarvest(userId, merged);
+  res.json({
+    ok: true,
+    updated,
+    added,
+    total: merged.total,
+    withDetail: allItems.filter((item) => item.detailCapturedAt).length
+  });
+});
+
+// Lo ya resuelto en la fase 2, para que la extensión se lo salte al retomar.
+app.get('/api/harvest/:userId/done', (req, res) => {
+  if (!isValidUserId(req.params.userId)) {
+    return res.status(400).json({ ok: false, error: 'userId no válido.' });
+  }
+
+  const current = readHarvest(req.params.userId);
+  const done = current.items.filter((item) => item.detailCapturedAt);
+  res.json({
+    ok: true,
+    profileTotal: current.profileTotal,
+    total: current.total,
+    photoIds: done.map((item) => item.photoId).filter(Boolean),
+    keys: done.map((item) => item.key)
+  });
+});
+
+// Resultado de la fase 2 con el mismo formato que contribuciones.json.
+app.get('/api/harvest/:userId/export', (req, res) => {
+  if (!isValidUserId(req.params.userId)) {
+    return res.status(400).json({ ok: false, error: 'userId no válido.' });
+  }
+
+  const done = readHarvest(req.params.userId).items.filter((item) => item.detailCapturedAt);
+  const dates = readDatesCache(datesPath(HARVEST_DIR, req.params.userId));
+  res.json({
+    total: done.length,
+    items: done.map((item, index) => ({
+      index: index + 1,
+      url: item.url,
+      // myTravelsArround no admite null en los campos opcionales: se omiten.
+      ...(item.url ? { mapsUrlCanonical: toCanonicalMapsUrl(item.url) } : {}),
+      ...(item.imageUrl ? { imageUrl: toStableThumbnailUrl(item.imageUrl) } : {}),
+      coordinates: item.coordinates,
+      capturedAt: item.detailCapturedAt,
+      ...takenAtFields(item, dates)
+    }))
+  });
+});
+
+// Muestras de las respuestas de red de Maps, para analizar si traen coordenadas.
+app.post('/api/harvest/network', (req, res) => {
+  const { userId, url, body } = req.body || {};
+  if (!isValidUserId(userId) || typeof body !== 'string') {
+    return res.status(400).json({ ok: false, error: 'Se esperaba { userId, url, body }.' });
+  }
+
+  fs.mkdirSync(HARVEST_DIR, { recursive: true });
+  fs.appendFileSync(
+    path.join(HARVEST_DIR, `${userId}.network.jsonl`),
+    `${JSON.stringify({ ...req.body, url: String(url || '') })}\n`,
+    'utf8'
+  );
+  res.json({ ok: true });
 });
 
 app.post('/api/log', (req, res) => {

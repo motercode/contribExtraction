@@ -45,6 +45,23 @@
         <button id="capture" class="primary">Extraer desde esta pestaña</button>
       </div>
       <button id="open-json" class="secondary">Abrir JSON</button>
+      <section class="harvest" aria-label="Inventario completo del perfil">
+        <h2>Inventario completo (fase 1)</h2>
+        <p id="harvest-status">Abre la pestaña de fotos de un perfil y pulsa Iniciar.</p>
+        <div class="actions">
+          <button id="harvest-start" class="primary">Iniciar</button>
+          <button id="harvest-stop">Detener</button>
+        </div>
+      </section>
+      <section class="harvest" aria-label="Coordenadas de cada foto">
+        <h2>Coordenadas (fase 2)</h2>
+        <p id="detail-status">Abre cada foto del inventario y guarda sus coordenadas. Usa las pausas de arriba.</p>
+        <div class="actions">
+          <button id="detail-start" class="primary">Iniciar / retomar</button>
+          <button id="detail-stop">Detener</button>
+        </div>
+        <button id="detail-open" class="secondary">Abrir resultado</button>
+      </section>
     </main>
     <script src="popup.js"></script>
   </body>

@@ -218,6 +218,126 @@ chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
   }
 });
 
+// --- Fase 1: inventario completo (corre en la pestaña; el popup solo lo controla) ---
+const harvestStatusNode = document.getElementById('harvest-status');
+const harvestStartButton = document.getElementById('harvest-start');
+const harvestStopButton = document.getElementById('harvest-stop');
+const harvestStatusKey = 'harvestStatus';
+
+const renderHarvestStatus = (status) => {
+  if (!status) {
+    return;
+  }
+
+  const total = status.profileTotal ? ` de ${status.profileTotal}` : '';
+  const state = status.running ? 'En marcha' : `Terminado (${status.finishReason || '—'})`;
+  const error = status.lastError ? ` · Error: ${status.lastError}` : '';
+  harvestStatusNode.textContent = `${state}: ${status.seen}${total} vistas, ${status.stored} guardadas${error}`;
+  harvestStatusNode.style.color = status.lastError ? '#a61b1b' : '#1f2937';
+};
+
+const sendToActiveTab = async (message) => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    throw new Error('No hay pestaña activa.');
+  }
+  return chrome.tabs.sendMessage(tab.id, message);
+};
+
+harvestStartButton.addEventListener('click', async () => {
+  const sessionId = createSessionId();
+  try {
+    const response = await sendToActiveTab({ type: 'HARVEST_START', sessionId });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'No se pudo iniciar el inventario.');
+    }
+    emitLogEvent(sessionId, 'harvest_requested', response);
+    harvestStatusNode.textContent = `Iniciado para ${response.userId} (${response.profileTotal ?? '¿?'} fotos). Puedes cerrar este popup.`;
+  } catch (error) {
+    harvestStatusNode.textContent = error.message || String(error);
+    harvestStatusNode.style.color = '#a61b1b';
+  }
+});
+
+harvestStopButton.addEventListener('click', async () => {
+  try {
+    await sendToActiveTab({ type: 'HARVEST_STOP' });
+    harvestStatusNode.textContent = 'Deteniendo… se guarda lo pendiente.';
+  } catch (error) {
+    harvestStatusNode.textContent = error.message || String(error);
+  }
+});
+
+chrome.storage.local.get(harvestStatusKey).then((result) => renderHarvestStatus(result[harvestStatusKey]));
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[harvestStatusKey]) {
+    renderHarvestStatus(changes[harvestStatusKey].newValue);
+  }
+});
+
+// --- Fase 2: coordenadas de cada foto (corre en la pestaña; el popup solo lo controla) ---
+const detailStatusNode = document.getElementById('detail-status');
+const detailStartButton = document.getElementById('detail-start');
+const detailStopButton = document.getElementById('detail-stop');
+const detailOpenButton = document.getElementById('detail-open');
+const detailStatusKey = 'detailStatus';
+let lastDetailUserId = null;
+
+const renderDetailStatus = (status) => {
+  if (!status) {
+    return;
+  }
+
+  lastDetailUserId = status.userId || lastDetailUserId;
+  const total = status.profileTotal ? ` de ${status.profileTotal}` : '';
+  const state = status.running ? 'En marcha' : `Terminado (${status.finishReason || '—'})`;
+  const error = status.lastError ? ` · Error: ${status.lastError}` : '';
+  detailStatusNode.textContent = `${state}: ${status.stored}${total} con coordenadas · esta vez ${status.captured} nuevas (${status.withDate ?? 0} con fecha), ${status.failed} fallidas${status.unpublished ? `, ${status.unpublished} no publicadas (saltadas)` : ''}${error}`;
+  detailStatusNode.style.color = status.lastError ? '#a61b1b' : '#1f2937';
+};
+
+detailStartButton.addEventListener('click', async () => {
+  const sessionId = createSessionId();
+  try {
+    await saveSettings();
+    const response = await sendToActiveTab({ type: 'DETAIL_START', sessionId, config: readSettingsFromForm() });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'No se pudo iniciar la fase 2.');
+    }
+    lastDetailUserId = response.userId;
+    emitLogEvent(sessionId, 'detail_requested', response);
+    detailStatusNode.textContent = `Iniciado para ${response.userId}. Puedes cerrar este popup; la pestaña debe seguir abierta.`;
+    detailStatusNode.style.color = '#1f2937';
+  } catch (error) {
+    detailStatusNode.textContent = error.message || String(error);
+    detailStatusNode.style.color = '#a61b1b';
+  }
+});
+
+detailStopButton.addEventListener('click', async () => {
+  try {
+    await sendToActiveTab({ type: 'DETAIL_STOP' });
+    detailStatusNode.textContent = 'Deteniendo… se guarda lo pendiente.';
+  } catch (error) {
+    detailStatusNode.textContent = error.message || String(error);
+  }
+});
+
+detailOpenButton.addEventListener('click', () => {
+  if (!lastDetailUserId) {
+    detailStatusNode.textContent = 'Aún no hay resultado: inicia la fase 2 primero.';
+    return;
+  }
+  window.open(`http://localhost:3000/api/harvest/${lastDetailUserId}/export`, '_blank');
+});
+
+chrome.storage.local.get(detailStatusKey).then((result) => renderDetailStatus(result[detailStatusKey]));
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[detailStatusKey]) {
+    renderDetailStatus(changes[detailStatusKey].newValue);
+  }
+});
+
 populateSettings();
 chrome.storage.local.get({ [storageKey]: defaultSettings }).then((result) => {
   applySettingsToForm(result[storageKey]);
