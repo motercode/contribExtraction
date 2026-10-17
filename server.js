@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { toCanonicalMapsUrl, toStableThumbnailUrl } from './lib/maps-url.js';
 import { datesPath, readDatesCache, takenAtFields } from './lib/taken-at.js';
+import { exportGallery, galleryPath, parseGalleryBody, readGalleryRecords } from './lib/gallery.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -495,6 +496,43 @@ app.post('/api/harvest/network', (req, res) => {
     'utf8'
   );
   res.json({ ok: true });
+});
+
+// --- Atajo: la galería completa pidiendo sus páginas, sin abrir fotos ---
+// Una línea por página en harvest/<userId>.gallery.jsonl. reset: true (primera página de una
+// recogida desde cero) vacía el archivo antes.
+app.post('/api/shortcut/page', (req, res) => {
+  const { userId, body, reset } = req.body || {};
+  if (!isValidUserId(userId) || typeof body !== 'string') {
+    return res.status(400).json({ ok: false, error: 'Se esperaba { userId, page, url, body }.' });
+  }
+  if (!parseGalleryBody(body)) {
+    return res.status(400).json({ ok: false, error: 'El cuerpo no es una respuesta de la galería.' });
+  }
+
+  fs.mkdirSync(HARVEST_DIR, { recursive: true });
+  const file = galleryPath(HARVEST_DIR, userId);
+  const line = `${JSON.stringify({ ...req.body, reset: undefined })}\n`;
+  if (reset) {
+    fs.writeFileSync(file, line, 'utf8');
+  } else {
+    fs.appendFileSync(file, line, 'utf8');
+  }
+  res.json({ ok: true });
+});
+
+// Resultado del atajo con el mismo formato que contribuciones.json.
+app.get('/api/shortcut/:userId/export', (req, res) => {
+  const { userId } = req.params;
+  if (!isValidUserId(userId)) {
+    return res.status(400).json({ ok: false, error: 'userId no válido.' });
+  }
+
+  const { items } = exportGallery(readGalleryRecords(galleryPath(HARVEST_DIR, userId)), {
+    userId,
+    datesCache: readDatesCache(datesPath(HARVEST_DIR, userId))
+  });
+  res.json({ total: items.length, items });
 });
 
 app.post('/api/log', (req, res) => {

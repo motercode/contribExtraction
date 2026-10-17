@@ -126,8 +126,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === 'DETAIL_SAVE') {
-    postJson('/api/harvest/details', message.payload)
+  if (message.type === 'DETAIL_SAVE' || message.type === 'SHORTCUT_PAGE') {
+    postJson(message.type === 'DETAIL_SAVE' ? '/api/harvest/details' : '/api/shortcut/page', message.payload)
       .then((result) => sendResponse(result))
       .catch(() => {
         sendResponse({ ok: false, error: 'No se pudo contactar con el backend local (npm start).' });

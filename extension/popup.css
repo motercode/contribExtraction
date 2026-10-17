@@ -93,3 +93,27 @@ button.secondary {
   width: 100%;
   margin-top: 12px;
 }
+
+h2 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+#shortcut-status {
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.setting-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+#shortcut-open {
+  width: 100%;
+  margin-top: 12px;
+}

@@ -44,6 +44,27 @@ http://localhost:3000
 5. El backend guarda el JSON en `contribuciones.json`.
    - El formato es el mismo que el test: `{ "total": number, "items": [...] }` con `index`, `url`, `mapsUrlCanonical`, `imageUrl`, `coordinates` y `capturedAt`.
 
+## Galería completa por red (rama `shortcut`)
+
+En esta rama el popup solo tiene esta opción. Sustituye a la fase 1 y la fase 2: no abre fotos ni baja por la galería.
+
+1. `npm start` y recarga la extensión en `chrome://extensions`.
+2. Abre la pestaña de fotos del perfil (`/maps/contrib/<userId>/photos`) y recárgala (F5).
+3. En el popup, **Iniciar / retomar**. Puedes cerrar el popup; la pestaña debe seguir abierta y **visible** (en segundo plano Chrome frena los temporizadores).
+4. **Detener** para pararla. Volver a iniciar sigue desde la última página guardada; marca *Empezar desde el principio* para recoger todo de nuevo.
+5. **Abrir resultado** (`GET /api/shortcut/<userId>/export`) o `npm run exportGallery -- <userId> [salida.json]`: formato de `contribuciones.json`.
+
+Qué hace:
+
+- Toma como plantilla la petición `/locationhistory/preview/mas` que hace Maps al bajar por la galería (si aún no la ha hecho, baja un poco hasta que la haga) y la repite cambiando solo el token de página (`!4m2!2s<token>!3i100`) por el que trae cada respuesta en `d[22][3]`. La primera página se pide sin token (`!4m1!3i100`).
+- ~1 petición por cada 100 fotos, con 1–2 s entre peticiones; ninguna miniatura. Errores pasajeros (red, 429, 5xx): reintenta a los 5, 15 y 45 s y, si siguen, se para (se puede retomar).
+- Guarda cada respuesta tal cual en `harvest/<userId>.gallery.jsonl`. De ahí salen photoId, coordenadas, tamaño, miniatura y día de captura (`lib/gallery.js`). La URL de Maps se construye sin la imagen grande (`!6s`), que la galería no trae: abre la misma foto.
+- Tipos (`entrada[21][2][1]`): 2 = 360°, 3 = foto normal, 4 = vídeo. Los vídeos se abren con `!1e5` en vez de `!1e1`; con `!1e1` Maps no los reproduce.
+- Las fotos asociadas a un lugar de Maps sin posición propia (unas 2 %) no traen coordenadas y no se exportan.
+- La hora exacta (EXIF) no viene en la galería: el export usa la de `harvest/<userId>.dates.json` si la hay y, si no, solo el día (`takenAtSource: "photometa"`). `npm run exportGallery -- <userId> [salida.json] --dates` la completa antes de exportar: una petición por foto, 8 en paralelo (`--concurrency=N`, 1–16) con freno automático si Google da errores, sin navegador, saltando los vídeos; se puede cortar con Ctrl+C y retomar. `--retry-missing` vuelve a pedir las que no tenían EXIF.
+
+`npm run exportTest -- <userId> [salida.json]` hace lo mismo pero a nombre del usuario ficticio `testA`, para compararlo en myTravelsArround con el export normal.
+
 ## Inventario completo de perfiles grandes (fase 1)
 
 Para perfiles con miles de fotos (p. ej. 16.598), abrir cada foto en una sola ejecución no es viable: tardaría horas y cualquier fallo perdería todo. La fase 1 hace solo el **inventario**:

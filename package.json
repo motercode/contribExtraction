@@ -10,7 +10,8 @@
     "stop": "node -e \"const http=require('http'); const req=http.request({host:'localhost', port:3000, path:'/', method:'DELETE'}, res=>{console.log('Stop request sent'); process.exit(0);}); req.on('error', () => process.exit(0)); req.end();\"",
     "test:maps-11": "node scripts/playwright-verify-11.js",
     "export": "node scripts/export-harvest.js",
-    "exportTest": "node scripts/export-network.js"
+    "exportTest": "node scripts/export-network.js --test",
+    "exportGallery": "node scripts/export-network.js"
   },
   "dependencies": {
     "express": "^4.21.2"

@@ -1616,6 +1616,301 @@ const runDetails = async (sessionId, config) => {
   });
 };
 
+// ---------------------------------------------------------------------------
+// Atajo: la galería completa sin abrir fotos ni bajar por ella.
+// Repite la petición que hace Maps al bajar por la galería (/locationhistory/preview/mas)
+// cambiando solo el token de página ("!4m2!2s<token>!3i100") por el que trae cada respuesta
+// en d[22][3]: ~1 petición por cada 100 fotos y ninguna miniatura. Cada respuesta se guarda
+// tal cual en harvest/<userId>.gallery.jsonl; photoId, coordenadas y día salen de ahí
+// (lib/gallery.js). Retomable: el token siguiente se guarda tras cada página.
+// ---------------------------------------------------------------------------
+const SHORTCUT_STATUS_KEY = 'shortcutStatus';
+const SHORTCUT_RESUME_KEY = 'shortcutResume';
+const SHORTCUT_DELAY_MS = 1500;
+const SHORTCUT_JITTER_MS = 500;
+const SHORTCUT_MAX_TRIES = 4;
+const SHORTCUT_RETRY_BASE_MS = 5000;
+const SHORTCUT_TEMPLATE_WAIT_MS = 20000;
+const GALLERY_REQUEST_PATH = '/locationhistory/preview/mas';
+// Bloque de página del pb: "!4m2!2s<token>!3i100" (o "!4m1!3i100" en la primera). El "!" puede
+// venir como "%21" según quién construya la URL.
+const PAGE_TOKEN_BLOCK = /(!|%21)4m\d+(?:\1(?:2s)[^!%&]*)?\1(?:3i)(\d+)/i;
+const HAS_PAGE_TOKEN = /(!|%21)4m\d+\1(?:2s)/i;
+
+// Maps hace dos tipos de petición a la galería: la inicial (sin token, con bloques extra de la
+// cabecera del perfil) y las de paginación al bajar (con token). Solo las de paginación aceptan
+// un token cambiado: con la inicial, Google responde 400 desde la segunda página.
+let lastGalleryPagingUrl = null;
+let lastGalleryInitialUrl = null;
+let galleryRequestsSeen = [];
+let shortcutState = null;
+
+// Por esa ruta pasan también otras peticiones del perfil: solo vale si la respuesta es una
+// página de fotos y la URL tiene el bloque de página.
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.data?.source !== NETWORK_TAP_SOURCE) {
+    return;
+  }
+  const url = String(event.data.url || '');
+  if (!url.includes(GALLERY_REQUEST_PATH)) {
+    return;
+  }
+
+  const page = parseGalleryPage(String(event.data.body || ''));
+  const usable = Boolean(page?.entries.length) && PAGE_TOKEN_BLOCK.test(url);
+  const paging = usable && HAS_PAGE_TOKEN.test(url);
+  galleryRequestsSeen = [...galleryRequestsSeen.slice(-4), { url: url.slice(0, 1500), entries: page?.entries.length ?? null, usable, paging }];
+  if (paging) {
+    lastGalleryPagingUrl = new URL(url, window.location.origin).href;
+  } else if (usable) {
+    lastGalleryInitialUrl = new URL(url, window.location.origin).href;
+  }
+});
+
+// Misma lógica que parseGalleryBody en lib/gallery.js (el content script no puede importar módulos).
+const parseGalleryPage = (body = '') => {
+  try {
+    const data = JSON.parse(body.slice(body.indexOf('\n') + 1));
+    const block = data?.[22];
+    if (!Array.isArray(block)) return null;
+    return {
+      entries: (block[1] || []).map((wrapper) => wrapper?.[0]).filter(Boolean),
+      nextToken: typeof block[3] === 'string' && block[3] ? block[3] : null
+    };
+  } catch {
+    return null;
+  }
+};
+
+// Sin token: primera página de la galería. Respeta el separador ("!" o "%21") y el tamaño de página.
+const withPageToken = (templateUrl, token) =>
+  templateUrl.replace(PAGE_TOKEN_BLOCK, (_block, bang, size) =>
+    token ? `${bang}4m2${bang}2s${token}${bang}3i${size}` : `${bang}4m1${bang}3i${size}`);
+
+const publishShortcutStatus = (patch = {}) => {
+  if (!shortcutState) {
+    return;
+  }
+
+  Object.assign(shortcutState.status, patch, { updatedAt: new Date().toISOString() });
+  try {
+    chrome.storage.local.set({ [SHORTCUT_STATUS_KEY]: { ...shortcutState.status } });
+  } catch {
+    // El estado es informativo; no debe parar la recogida.
+  }
+};
+
+// Si Maps aún no ha pedido ninguna página al bajar, se baja por la galería hasta que lo haga.
+const waitForGalleryTemplate = async () => {
+  const target = findScrollableElement();
+  const startedAt = Date.now();
+  while (!lastGalleryPagingUrl && Date.now() - startedAt < SHORTCUT_TEMPLATE_WAIT_MS) {
+    if (shortcutState.stopRequested) {
+      return null;
+    }
+    target.scrollTop = target.scrollHeight;
+    await sleep(1500);
+    if (!lastGalleryPagingUrl) {
+      target.scrollTop = Math.max(0, (target.scrollTop || 0) - 600);
+      await sleep(400);
+    }
+  }
+
+  if (!lastGalleryPagingUrl) {
+    // Diagnóstico: qué peticiones de esa ruta se vieron y por qué no valían.
+    emitProcessLog('shortcut_no_template', { galleryRequestsSeen }, 'error');
+    throw new Error(galleryRequestsSeen.length
+      ? 'Maps no ha pedido ninguna página de la galería al bajar (solo la inicial). Baja un poco por la pestaña Fotos y vuelve a intentarlo. Detalle en el log (shortcut_no_template).'
+      : 'Maps no ha pedido ninguna página de la galería. Baja un poco por la pestaña Fotos y vuelve a intentarlo.');
+  }
+  return lastGalleryPagingUrl;
+};
+
+class GalleryHttpError extends Error {
+  constructor(status) {
+    super(`HTTP ${status}`);
+    this.status = status;
+  }
+}
+
+// Reintenta errores pasajeros (red, 429, 5xx) con esperas de 5, 15 y 45 s. Un 4xx no se
+// reintenta: la petición está mal y repetirla no lo arregla.
+const fetchGalleryPage = async (url) => {
+  for (let attempt = 1; ; attempt += 1) {
+    let error;
+    try {
+      const response = await fetch(url, { credentials: 'include' });
+      if (response.ok) {
+        const body = await response.text();
+        const page = parseGalleryPage(body);
+        if (page) {
+          return { body, page };
+        }
+        error = new Error('La respuesta no es una página de la galería.');
+      } else {
+        error = new GalleryHttpError(response.status);
+        if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+          throw error;
+        }
+      }
+    } catch (fetchError) {
+      if (fetchError instanceof GalleryHttpError) {
+        throw fetchError;
+      }
+      error = fetchError;
+    }
+
+    if (attempt >= SHORTCUT_MAX_TRIES || shortcutState.stopRequested) {
+      throw error;
+    }
+    emitProcessLog('shortcut_retry', { attempt, error: String(error?.message || error), url: url.slice(0, 1500) }, 'warn');
+    await sleep(SHORTCUT_RETRY_BASE_MS * 3 ** (attempt - 1));
+  }
+};
+
+const isRequestError = (error) => error instanceof GalleryHttpError && error.status !== 429 && error.status < 500;
+
+// Primera página: la plantilla de paginación sin token; si Google no la acepta, la petición
+// inicial de Maps tal cual.
+const fetchFirstGalleryPage = async (template) => {
+  const url = withPageToken(template, null);
+  try {
+    return { url, ...(await fetchGalleryPage(url)) };
+  } catch (error) {
+    if (!isRequestError(error) || !lastGalleryInitialUrl) {
+      throw error;
+    }
+    emitProcessLog('shortcut_first_page_fallback', { error: String(error.message), url: url.slice(0, 1500) }, 'warn');
+    return { url: lastGalleryInitialUrl, ...(await fetchGalleryPage(lastGalleryInitialUrl)) };
+  }
+};
+
+const runShortcut = async (sessionId, restart) => {
+  const userId = getContribUserId();
+  const profileTotal = readProfilePhotoTotal();
+
+  shortcutState = {
+    stopRequested: false,
+    status: { running: true, userId, profileTotal, pages: 0, photos: 0, resumed: false, startedAt: new Date().toISOString(), lastError: null }
+  };
+  publishShortcutStatus();
+
+  let finishReason = 'stopped';
+
+  try {
+    const saved = restart ? null : (await chrome.storage.local.get(SHORTCUT_RESUME_KEY))[SHORTCUT_RESUME_KEY];
+    let resume = saved?.userId === userId && saved.nextToken ? saved : null;
+    let token = resume?.nextToken || null;
+    let pages = resume?.pages || 0;
+    let photos = resume?.photos || 0;
+    publishShortcutStatus({ resumed: Boolean(resume), pages, photos });
+
+    const template = await waitForGalleryTemplate();
+    emitProcessLog('shortcut_started', { userId, profileTotal, resumed: Boolean(resume), pages, photos, template });
+
+    while (template) {
+      if (shortcutState.stopRequested) {
+        finishReason = 'stopped_by_user';
+        break;
+      }
+
+      let result;
+      try {
+        result = token
+          ? { url: withPageToken(template, token), ...(await fetchGalleryPage(withPageToken(template, token))) }
+          : await fetchFirstGalleryPage(template);
+      } catch (error) {
+        // Un token guardado de otra sesión puede no valer: se empieza de cero una vez.
+        if (!(resume && pages === resume.pages && isRequestError(error))) {
+          emitProcessLog('shortcut_request_failed', { error: String(error?.message || error), pages, url: token ? withPageToken(template, token).slice(0, 1500) : null }, 'error');
+          throw error;
+        }
+        emitProcessLog('shortcut_resume_failed', { error: String(error.message), pages }, 'warn');
+        token = null;
+        pages = 0;
+        photos = 0;
+        resume = null;
+        publishShortcutStatus({ resumed: false, pages, photos });
+        continue;
+      }
+
+      const { url, body, page } = result;
+      const saveResponse = await sendToBackground({
+        type: 'SHORTCUT_PAGE',
+        payload: {
+          userId,
+          sessionId,
+          page: pages + 1,
+          url,
+          bodyLength: body.length,
+          body,
+          capturedAt: new Date().toISOString(),
+          // Recogida desde cero: la primera página sustituye lo guardado antes.
+          reset: pages === 0
+        }
+      });
+      if (!saveResponse.ok) {
+        throw new Error(saveResponse.error || 'No se pudo guardar en el backend.');
+      }
+
+      pages += 1;
+      photos += page.entries.length;
+      token = page.nextToken;
+      await chrome.storage.local.set({ [SHORTCUT_RESUME_KEY]: { userId, nextToken: token, pages, photos, updatedAt: new Date().toISOString() } });
+      publishShortcutStatus({ pages, photos });
+      if (pages % 20 === 0) {
+        emitProcessLog('shortcut_progress', { pages, photos, profileTotal });
+      }
+
+      if (!token || page.entries.length === 0) {
+        finishReason = 'no_more_pages';
+        break;
+      }
+      // Cadencia irregular: 1–2 s entre páginas.
+      await sleep(SHORTCUT_DELAY_MS + (Math.random() * 2 - 1) * SHORTCUT_JITTER_MS);
+    }
+    if (!template) {
+      finishReason = 'stopped_by_user';
+    }
+  } catch (error) {
+    finishReason = 'error';
+    publishShortcutStatus({ lastError: String(error?.message || error) });
+    emitProcessLog('shortcut_failed', { error: String(error?.message || error) }, 'error');
+  }
+
+  if (finishReason === 'no_more_pages') {
+    await chrome.storage.local.remove(SHORTCUT_RESUME_KEY);
+  }
+  publishShortcutStatus({ running: false, finishReason });
+  emitProcessLog('shortcut_finished', { finishReason, ...shortcutState.status });
+};
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'SHORTCUT_START') {
+    if (shortcutState?.status.running || detailState?.status.running || harvestState?.status.running) {
+      sendResponse({ ok: false, error: 'Ya hay un proceso en marcha en esta pestaña.' });
+      return;
+    }
+    if (!getContribUserId()) {
+      sendResponse({ ok: false, error: 'Abre la pestaña de fotos de un perfil (/maps/contrib/<id>/photos).' });
+      return;
+    }
+
+    activeExtractionSessionId = String(message.sessionId || `shortcut-${Date.now()}`);
+    activeExtractionStartedAt = Date.now();
+    void runShortcut(activeExtractionSessionId, Boolean(message.restart));
+    sendResponse({ ok: true, userId: getContribUserId(), profileTotal: readProfilePhotoTotal() });
+    return;
+  }
+
+  if (message.type === 'SHORTCUT_STOP') {
+    if (shortcutState) {
+      shortcutState.stopRequested = true;
+    }
+    sendResponse({ ok: true });
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'DETAIL_START') {
     if (detailState?.status.running || harvestState?.status.running) {

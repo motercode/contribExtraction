@@ -9,58 +9,19 @@
   <body>
     <main class="popup-shell">
       <h1>ContribExtraction</h1>
-      <p id="status">Abre Google Maps y luego extrae la pestaña actual.</p>
-      <section class="settings" aria-label="Configuración de extracción">
-        <label class="setting">
-          <span>Máx. elementos</span>
-          <select id="max-items"></select>
+      <p id="status">Abre la pestaña de fotos de un perfil (/maps/contrib/&lt;id&gt;/photos) y pulsa Iniciar.</p>
+      <section aria-label="Galería completa">
+        <h2>Galería completa (atajo)</h2>
+        <p id="shortcut-status">Pide las páginas de la galería directamente (~1 petición por cada 100 fotos), sin abrir fotos. Deja la pestaña visible mientras corre.</p>
+        <label class="setting setting-inline">
+          <input id="shortcut-restart" type="checkbox" />
+          <span>Empezar desde el principio</span>
         </label>
-        <label class="setting">
-          <span>Pausa entre fotos</span>
-          <select id="gallery-item-delay-ms"></select>
-        </label>
-        <label class="setting">
-          <span>Pausa de scroll</span>
-          <select id="scroll-step-delay-ms"></select>
-        </label>
-        <label class="setting">
-          <span>Espera de cambio de URL</span>
-          <select id="url-change-timeout-ms"></select>
-        </label>
-        <label class="setting">
-          <span>Espera de estabilidad</span>
-          <select id="url-stable-timeout-ms"></select>
-        </label>
-        <label class="setting">
-          <span>Pausa tras consentimiento</span>
-          <select id="consent-post-click-delay-ms"></select>
-        </label>
-        <label class="setting">
-          <span>Pausa de fallback</span>
-          <select id="gallery-fallback-click-delay-ms"></select>
-        </label>
-      </section>
-      <div class="actions">
-        <button id="open-maps">Abrir Google Maps</button>
-        <button id="capture" class="primary">Extraer desde esta pestaña</button>
-      </div>
-      <button id="open-json" class="secondary">Abrir JSON</button>
-      <section class="harvest" aria-label="Inventario completo del perfil">
-        <h2>Inventario completo (fase 1)</h2>
-        <p id="harvest-status">Abre la pestaña de fotos de un perfil y pulsa Iniciar.</p>
         <div class="actions">
-          <button id="harvest-start" class="primary">Iniciar</button>
-          <button id="harvest-stop">Detener</button>
+          <button id="shortcut-start" class="primary">Iniciar / retomar</button>
+          <button id="shortcut-stop">Detener</button>
         </div>
-      </section>
-      <section class="harvest" aria-label="Coordenadas de cada foto">
-        <h2>Coordenadas (fase 2)</h2>
-        <p id="detail-status">Abre cada foto del inventario y guarda sus coordenadas. Usa las pausas de arriba.</p>
-        <div class="actions">
-          <button id="detail-start" class="primary">Iniciar / retomar</button>
-          <button id="detail-stop">Detener</button>
-        </div>
-        <button id="detail-open" class="secondary">Abrir resultado</button>
+        <button id="shortcut-open" class="secondary">Abrir resultado</button>
       </section>
     </main>
     <script src="popup.js"></script>
